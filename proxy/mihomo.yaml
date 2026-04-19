@@ -41,4 +41,13 @@ rules:
   - DOMAIN-SUFFIX,telegra.ph,PROXY
   - DOMAIN-SUFFIX,tdesktop.com,PROXY
   - DOMAIN-SUFFIX,telesco.pe,PROXY
+  # Meta / Instagram / TikTok и др. — иначе yt-dlp идёт в MATCH,DIRECT с российского IP.
+  - DOMAIN-SUFFIX,instagram.com,PROXY
+  - DOMAIN-SUFFIX,cdninstagram.com,PROXY
+  - DOMAIN-SUFFIX,fbcdn.net,PROXY
+  - DOMAIN-SUFFIX,facebook.com,PROXY
+  - DOMAIN-SUFFIX,fb.com,PROXY
+  - DOMAIN-SUFFIX,tiktok.com,PROXY
+  - DOMAIN-SUFFIX,tiktokv.com,PROXY
+  - DOMAIN-SUFFIX,ttwstatic.com,PROXY
   - MATCH,DIRECT

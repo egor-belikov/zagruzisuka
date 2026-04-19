@@ -10,6 +10,9 @@ class WorkerSettings(CommonSettings):
     INSTAGRAM_ENCODE_TO_H264: bool
     FACEBOOK_ENCODE_TO_H264: bool
     MAX_DOWNLOAD_THREADS: str
+    # Опционально: socks5h://yt_proxy:10808 — yt-dlp через Mihomo (Instagram и др.).
+    YTDLP_PROXY: str | None = None
+    YTDLP_MAX_FILESIZE_BYTES: str | None = None
 
     @field_validator('MAX_DOWNLOAD_THREADS')
     @classmethod

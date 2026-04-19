@@ -1,5 +1,6 @@
 import glob
 import logging
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -7,6 +8,7 @@ from tempfile import TemporaryDirectory
 from typing import ClassVar
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from yt_shared.enums import DownMediaType
 from yt_shared.schemas.media import Audio, DownMedia, InbMediaPayload, Video
 from yt_shared.utils.common import format_bytes, gen_random_str
@@ -20,6 +22,43 @@ try:
     from ytdl_opts.user import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
 except ImportError:
     from ytdl_opts.default import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
+
+_DEFAULT_MAX_FILESIZE = 10 * 1024 * 1024 * 1024
+
+
+def _first_env_proxy() -> str | None:
+    for key in (
+        'YTDLP_PROXY',
+        'ALL_PROXY',
+        'HTTPS_PROXY',
+        'https_proxy',
+        'HTTP_PROXY',
+        'http_proxy',
+    ):
+        raw = (os.environ.get(key) or '').strip()
+        if raw:
+            return raw
+    return None
+
+
+def _merge_global_ytdl_opts(opts: dict) -> dict:
+    out = dict(opts)
+    if out.get('proxy') in (None, ''):
+        p = _first_env_proxy()
+        if p:
+            out['proxy'] = p
+    if out.get('max_filesize') in (None, 0):
+        raw = (os.environ.get('YTDLP_MAX_FILESIZE_BYTES') or '').strip().lower()
+        if raw in ('0', 'none', 'unlimited'):
+            pass
+        elif raw:
+            try:
+                out['max_filesize'] = int(raw, 10)
+            except ValueError:
+                out['max_filesize'] = _DEFAULT_MAX_FILESIZE
+        else:
+            out['max_filesize'] = _DEFAULT_MAX_FILESIZE
+    return out
 
 
 class MediaDownloader:
@@ -71,7 +110,7 @@ class MediaDownloader:
                 media_type=media_type, curr_tmp_dir=curr_tmp_dir
             )
 
-            opts = dict(ytdl_opts_model.ytdl_opts)
+            opts = _merge_global_ytdl_opts(dict(ytdl_opts_model.ytdl_opts))
             hooks = list(opts.get('progress_hooks') or [])
             if progress_hook:
                 hooks.append(progress_hook)
@@ -81,7 +120,11 @@ class MediaDownloader:
                 self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)
                 self._log.info('Downloading with options: %s', opts)
 
-                meta: dict | None = ytdl.extract_info(url, download=True)
+                try:
+                    meta: dict | None = ytdl.extract_info(url, download=True)
+                except DownloadError as err:
+                    self._log.error('yt-dlp DownloadError for %s: %s', url, err)
+                    raise MediaDownloaderError(str(err)) from err
                 if not meta:
                     err_msg = 'Error during media download. Check logs.'
                     self._log.error('%s. Meta: %s', err_msg, meta)

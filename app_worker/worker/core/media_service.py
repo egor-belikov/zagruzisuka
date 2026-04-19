@@ -50,6 +50,7 @@ class MediaService:
     async def _process(self) -> DownMedia:
         host_conf = self._get_host_conf()
         await self._repository.save_as_processing(self._task)
+        await self._send_progress_line('⏳ Подключение к источнику…')
         media = await self._start_download(host_conf=host_conf)
         try:
             await self._post_process_media(media=media, host_conf=host_conf)
@@ -70,6 +71,10 @@ class MediaService:
         st = d.get('status')
         if st == 'finished':
             return 'Файл собран, финализация…'
+        if st == 'extracting':
+            return 'Получение метаданных…'
+        if st in ('postprocessing', 'processing'):
+            return 'Постобработка…'
         if st != 'downloading':
             return None
         parts: list[str] = []
@@ -79,7 +84,7 @@ class MediaService:
             parts.append(f'⚡ {s.strip()}')
         if e := d.get('_eta_str'):
             parts.append(f'ETA {e.strip()}')
-        return ' · '.join(parts) if parts else None
+        return ' · '.join(parts) if parts else 'Скачивание…'
 
     async def _send_progress_line(self, line: str) -> None:
         if self._media_payload.ack_message_id is None:
@@ -106,7 +111,7 @@ class MediaService:
                 if not line:
                     return
                 now = time.monotonic()
-                if now - last_ts[0] < 1.8:
+                if now - last_ts[0] < 0.9:
                     return
                 last_ts[0] = now
                 fut = asyncio.run_coroutine_threadsafe(

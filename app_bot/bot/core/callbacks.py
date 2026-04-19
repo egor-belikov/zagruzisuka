@@ -5,7 +5,7 @@ from pyrogram.types import Message
 from yt_shared.emoji import SUCCESS_EMOJI
 
 from bot.bot.client import VideoBotClient
-from bot.core.queue_status import input_queue_ready_count
+from bot.core.queue_status import download_workflow_backlog_count
 from bot.core.service import UrlParser, UrlService
 from bot.core.utils import bold, get_user_id
 
@@ -31,13 +31,12 @@ class TelegramCallback:
 
     @staticmethod
     async def on_queue(client: VideoBotClient, message: Message) -> None:  # noqa: ARG004
-        n = await input_queue_ready_count()
+        n = await download_workflow_backlog_count()
         await message.reply(
             (
                 '📥 <b>Очередь загрузок</b>\n'
-                f'Сообщений в очереди (ожидают воркера): <code>{n}</code>\n\n'
-                '<i>Пока файл скачивается, задача не считается в этой очереди '
-                '(см. обновления под вашим сообщением).</i>'
+                f'Активных задач (в RabbitMQ + в работе у воркера): <code>{n}</code>\n\n'
+                '<i>Прогресс по вашей ссылке обновляется под ответом «URL sent…».</i>'
             ),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=message.id,
@@ -69,10 +68,10 @@ class TelegramCallback:
         await self._url_service.process_urls(url_objects)
         if url_objects:
             try:
-                n = await input_queue_ready_count()
+                n = await download_workflow_backlog_count()
                 base = self._format_acknowledge_text(len(url_objects))
                 await ack_message.edit_text(
-                    text=f'{base}\n\n📊 <b>Очередь</b>: впереди около {n} задач(и)',
+                    text=f'{base}\n\n📊 <b>Очередь</b>: сейчас ~{n} задач(и) впереди (включая эту)',
                     parse_mode=ParseMode.HTML,
                 )
             except Exception:
