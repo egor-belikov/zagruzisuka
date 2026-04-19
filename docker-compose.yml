@@ -92,7 +92,11 @@ services:
       - ./proxy/providers:/root/.config/mihomo/providers
 
 volumes:
+  # Было COMPOSE_PROJECT_NAME=yt → том с данными Postgres на этом VPS называется yt_pgdata.
+  # На новом сервере: docker volume create yt_pgdata (или убери external и импортируй дамп).
   pgdata:
+    external: true
+    name: yt_pgdata
   shared-tmpfs:
     driver: local
     driver_opts:
