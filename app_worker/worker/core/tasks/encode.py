@@ -7,7 +7,8 @@ from worker.enums import VideoCodecName, VideoCodecType
 
 class EncodeToH264Task(AbstractFfBinaryTask):
     _EXT = 'mp4'
-    _CMD_TIMEOUT = 300
+    # Long reels / slow CPU: avoid killing a valid but slow encode (was 300s → ~5min wall on VPS).
+    _CMD_TIMEOUT = 900
 
     def __init__(
         self, media: DownMedia, cmd_tpl: str, check_if_in_final_format: bool = True
@@ -51,7 +52,9 @@ class EncodeToH264Task(AbstractFfBinaryTask):
 
         proc = await self._run_proc(cmd)
         if not proc:
-            return
+            err_msg = 'FFmpeg encode timed out or failed to start; see worker logs.'
+            self._log.error(err_msg)
+            raise RuntimeError(err_msg)
 
         stdout, stderr = await self._get_stdout_stderr(proc)
         self._log.info(
