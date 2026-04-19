@@ -32,4 +32,4 @@ class AbstractDownloadHandler(ABC):
     def _get_receiving_users(self) -> list[AnonymousUserSchema | UserSchema]:
         if self._body.context.source is TaskSource.API:
             return self._bot.conf.telegram.api.upload_to_chat_ids.copy()
-        return [self._bot.allowed_users[self._get_sender_id()]]
+        return [self._bot.get_user_config(self._get_sender_id())]

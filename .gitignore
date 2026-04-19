@@ -2,6 +2,11 @@
 **/_cookies.txt
 apk_mirrors
 
+# Local / generated (do not commit)
+.env
+compose.resolved.yml
+app_worker/cookies/*.txt
+
 # Byte-compiled / optimized / DLL files
 
 rsync.sh

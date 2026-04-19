@@ -30,8 +30,11 @@ class RMQCallbacks:
             await self._reject_invalid_message(message)
             return
 
-        await message.ack()
-        await self._payload_handler.handle(media_payload=media_payload)
+        try:
+            await self._payload_handler.handle(media_payload=media_payload)
+        finally:
+            if not message.processed:
+                await message.ack()
         self._log.info('Processing done with payload: %s', media_payload)
 
     async def _reject_invalid_message(self, message: IncomingMessage) -> None:

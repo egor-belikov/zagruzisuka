@@ -224,7 +224,7 @@ class AudioUploadTask(AbstractUploadTask):
         self._media_ctx.is_cached = True
         self._cached_message = message
 
-        self._create_cache_task(cache_object=audio)
+        # cache disabled by deployment policy
 
     def _generate_caption_items(self) -> list[str]:
         return [
@@ -310,4 +310,4 @@ class VideoUploadTask(AbstractUploadTask):
         self._media_ctx.is_cached = True
         self._cached_message = message
 
-        self._create_cache_task(cache_object=video)
+        # cache disabled by deployment policy

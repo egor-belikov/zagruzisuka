@@ -1,0 +1,40 @@
+services:
+  yt_api:
+    mem_limit: 384m
+    cpus: "0.40"
+    restart: unless-stopped
+
+  yt_bot:
+    mem_limit: 512m
+    cpus: "0.60"
+    restart: unless-stopped
+    volumes:
+      - "/data/yt_tmp:/tmp/download_tmpfs"
+
+  yt_worker:
+    mem_limit: 768m
+    cpus: "0.80"
+    restart: unless-stopped
+    volumes:
+      - "/data/downloads:/filestorage"
+      - "/data/yt_tmp:/tmp/download_tmpfs"
+
+  yt_postgres:
+    mem_limit: 384m
+    cpus: "0.40"
+    restart: unless-stopped
+
+  yt_rabbitmq:
+    mem_limit: 256m
+    cpus: "0.30"
+    restart: unless-stopped
+
+  yt_redis:
+    mem_limit: 128m
+    cpus: "0.20"
+    restart: unless-stopped
+
+  yt_proxy:
+    mem_limit: 128m
+    cpus: "0.15"
+    restart: unless-stopped

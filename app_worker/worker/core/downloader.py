@@ -39,16 +39,26 @@ class MediaDownloader:
         )
 
     def download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self,
+        host_conf: AbstractHostConfig,
+        media_payload: InbMediaPayload,
+        progress_hook: Callable[[dict], None] | None = None,
     ) -> DownMedia:
         try:
-            return self._download(host_conf=host_conf, media_payload=media_payload)
+            return self._download(
+                host_conf=host_conf,
+                media_payload=media_payload,
+                progress_hook=progress_hook,
+            )
         except Exception:
             self._log.error('Failed to download %s', host_conf.url)
             raise
 
     def _download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self,
+        host_conf: AbstractHostConfig,
+        media_payload: InbMediaPayload,
+        progress_hook: Callable[[dict], None] | None = None,
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
@@ -61,11 +71,15 @@ class MediaDownloader:
                 media_type=media_type, curr_tmp_dir=curr_tmp_dir
             )
 
-            with yt_dlp.YoutubeDL(ytdl_opts_model.ytdl_opts) as ytdl:
+            opts = dict(ytdl_opts_model.ytdl_opts)
+            hooks = list(opts.get('progress_hooks') or [])
+            if progress_hook:
+                hooks.append(progress_hook)
+            opts['progress_hooks'] = hooks
+
+            with yt_dlp.YoutubeDL(opts) as ytdl:
                 self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)
-                self._log.info(
-                    'Downloading with options: %s', ytdl_opts_model.ytdl_opts
-                )
+                self._log.info('Downloading with options: %s', opts)
 
                 meta: dict | None = ytdl.extract_info(url, download=True)
                 if not meta:

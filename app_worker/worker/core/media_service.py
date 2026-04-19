@@ -9,8 +9,10 @@ from urllib.parse import urlsplit
 
 from yt_shared.enums import DownMediaType, TaskStatus
 from yt_shared.models import Task
+from yt_shared.rabbit.publisher import RmqPublisher
 from yt_shared.repositories.task import TaskRepository
 from yt_shared.schemas.media import BaseMedia, DownMedia, InbMediaPayload, Video
+from yt_shared.schemas.progress import DownloadProgressPayload
 from yt_shared.utils.common import gen_random_str
 from yt_shared.utils.file import remove_dir
 from yt_shared.utils.tasks.tasks import create_task
@@ -63,12 +65,74 @@ class MediaService:
         host_cls = host_to_cls_map.get(urlsplit(url).netloc, host_to_cls_map[None])
         return host_cls(url=url)
 
+    @staticmethod
+    def _format_ytdlp_progress_line(d: dict) -> str | None:
+        st = d.get('status')
+        if st == 'finished':
+            return 'Файл собран, финализация…'
+        if st != 'downloading':
+            return None
+        parts: list[str] = []
+        if p := d.get('_percent_str'):
+            parts.append(p.strip())
+        if s := d.get('_speed_str'):
+            parts.append(f'⚡ {s.strip()}')
+        if e := d.get('_eta_str'):
+            parts.append(f'ETA {e.strip()}')
+        return ' · '.join(parts) if parts else None
+
+    async def _send_progress_line(self, line: str) -> None:
+        if self._media_payload.ack_message_id is None:
+            return
+        if self._media_payload.from_chat_id is None:
+            return
+        publisher = RmqPublisher()
+        payload = DownloadProgressPayload(
+            task_id=self._task.id,
+            from_chat_id=self._media_payload.from_chat_id,
+            ack_message_id=self._media_payload.ack_message_id,
+            url=self._media_payload.url[:512],
+            line=line[:1024],
+        )
+        await publisher.send_download_progress(payload)
+
     async def _start_download(self, host_conf: AbstractHostConfig) -> DownMedia:
+        loop = asyncio.get_running_loop()
+        last_ts = [0.0]
+
+        def progress_hook(d: dict) -> None:
+            try:
+                line = MediaService._format_ytdlp_progress_line(d)
+                if not line:
+                    return
+                now = time.monotonic()
+                if now - last_ts[0] < 1.8:
+                    return
+                last_ts[0] = now
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._send_progress_line(line),
+                    loop,
+                )
+
+                def _done(f: asyncio.Future) -> None:
+                    try:
+                        exc = f.exception()
+                    except asyncio.CancelledError:
+                        return
+                    if exc:
+                        self._log.debug('progress publish failed: %s', exc)
+
+                fut.add_done_callback(_done)
+            except Exception:
+                return
+
         try:
-            return await asyncio.get_running_loop().run_in_executor(
+            return await loop.run_in_executor(
                 None,
                 lambda: self._downloader.download(
-                    host_conf=host_conf, media_payload=self._media_payload
+                    host_conf=host_conf,
+                    media_payload=self._media_payload,
+                    progress_hook=progress_hook,
                 ),
             )
         except Exception as err:

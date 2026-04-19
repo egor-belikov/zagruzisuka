@@ -1,4 +1,5 @@
 import logging
+import os
 
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
@@ -13,6 +14,16 @@ from bot.core.tasks.ytdlp import YtdlpNewVersionNotifyTask
 from bot.core.workers.manager import RabbitWorkerManager
 
 
+def _telegram_socks5_proxy() -> dict | None:
+    raw = (os.environ.get('TELEGRAM_SOCKS5_PROXY') or '').strip()
+    if not raw:
+        return None
+    host, sep, port_s = raw.rpartition(':')
+    if not sep or not port_s.isdigit():
+        return None
+    return {'scheme': 'socks5', 'hostname': host, 'port': int(port_s)}
+
+
 class BotLauncher:
     """Bot launcher which parses configuration file, creates and starts the bot."""
 
@@ -21,13 +32,17 @@ class BotLauncher:
     def __init__(self) -> None:
         self._log = logging.getLogger(self.__class__.__name__)
         self._conf = get_main_config()
-        self._bot = VideoBotClient(
-            name='default_name',
-            api_id=self._conf.telegram.api_id,
-            api_hash=self._conf.telegram.api_hash,
-            bot_token=self._conf.telegram.token,
-            conf=self._conf,
-        )
+        client_kwargs: dict = {
+            'name': 'default_name',
+            'api_id': self._conf.telegram.api_id,
+            'api_hash': self._conf.telegram.api_hash,
+            'bot_token': self._conf.telegram.token,
+            'conf': self._conf,
+        }
+        proxy = _telegram_socks5_proxy()
+        if proxy:
+            client_kwargs['proxy'] = proxy
+        self._bot = VideoBotClient(**client_kwargs)
         self._rabbit_mq = get_rabbitmq()
         self._rabbit_worker_manager = RabbitWorkerManager(bot=self._bot)
 
@@ -39,22 +54,23 @@ class BotLauncher:
 
     def _setup_handlers(self) -> None:
         cb = TelegramCallback()
-        allowed_users = list(self._bot.allowed_users.keys())
 
         self._bot.add_handler(
             MessageHandler(
                 cb.on_start,
-                filters=filters.user(allowed_users)
-                & filters.command(['start', 'help']),
+                filters=filters.command(['start', 'help']),
+            )
+        )
+        self._bot.add_handler(
+            MessageHandler(
+                cb.on_queue,
+                filters=filters.command(['queue', 'очередь']),
             )
         )
         self._bot.add_handler(
             MessageHandler(
                 cb.on_message,
-                filters=(
-                    filters.regex(self.REGEX_NOT_START_WITH_SLASH)
-                    & (filters.user(allowed_users) | filters.chat(allowed_users))
-                ),
+                filters=filters.regex(self.REGEX_NOT_START_WITH_SLASH),
             )
         )
 

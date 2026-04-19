@@ -29,6 +29,16 @@ class VideoBotClient(Client):
             if user.is_admin:
                 self.admin_users[user.id] = user
 
+    def get_user_config(self, user_id: int | None) -> UserSchema:
+        """Return user config or fallback to first configured template."""
+        template = next(iter(self.allowed_users.values()))
+        if user_id is not None:
+            user = self.allowed_users.get(user_id)
+            if user is not None:
+                return user
+            return template.model_copy(update={"id": user_id})
+        return template
+
     async def run_forever(self) -> None:
         """Firstly, 'await bot.start()' should be called."""
         if not self.is_initialized:

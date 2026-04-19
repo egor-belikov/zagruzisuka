@@ -1,0 +1,44 @@
+mixed-port: 10808
+allow-lan: true
+mode: rule
+log-level: info
+external-controller: 0.0.0.0:9090
+secret: ""
+
+proxy-providers:
+  wizard:
+    type: http
+    url: "https://sub.wizard.cheap/sub/1664b061fd5fdffd3123ace49178100e"
+    path: ./providers/wizard.yaml
+    interval: 3600
+    health-check:
+      enable: true
+      interval: 600
+      url: https://connectivitycheck.gstatic.com/generate_204
+
+proxy-groups:
+  - name: PROXY
+    type: url-test
+    use:
+      - wizard
+    url: https://connectivitycheck.gstatic.com/generate_204
+    interval: 300
+    lazy: false
+
+rules:
+  - IP-CIDR,149.154.160.0/20,PROXY
+  - IP-CIDR,91.108.4.0/22,PROXY
+  - IP-CIDR,91.108.8.0/22,PROXY
+  - IP-CIDR,91.108.12.0/22,PROXY
+  - IP-CIDR,91.108.16.0/22,PROXY
+  - IP-CIDR,91.108.56.0/22,PROXY
+  - IP-CIDR,91.108.32.0/22,PROXY
+  - IP-CIDR,95.161.64.0/20,PROXY
+  - IP-CIDR,91.105.192.0/23,PROXY
+  - IP-CIDR,185.76.151.0/24,PROXY
+  - DOMAIN-SUFFIX,t.me,PROXY
+  - DOMAIN-SUFFIX,telegram.org,PROXY
+  - DOMAIN-SUFFIX,telegra.ph,PROXY
+  - DOMAIN-SUFFIX,tdesktop.com,PROXY
+  - DOMAIN-SUFFIX,telesco.pe,PROXY
+  - MATCH,DIRECT

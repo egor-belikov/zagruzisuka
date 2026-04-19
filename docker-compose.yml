@@ -1,3 +1,5 @@
+name: zagruzisuka
+
 services:
   base-image:
     image: yt-base-image
@@ -7,7 +9,7 @@ services:
       mode: replicated
       replicas: 0
   yt_api:
-    container_name: yt_api
+    container_name: zagruzisuka_api
     build:
       context: .
       dockerfile: app_api/Dockerfile
@@ -24,7 +26,7 @@ services:
       - yt_worker
       - yt_redis
   yt_bot:
-    container_name: yt_bot
+    container_name: zagruzisuka_bot
     build:
       context: .
       dockerfile: app_bot/Dockerfile
@@ -35,6 +37,7 @@ services:
     command: >
       bash -c "python start.py && python main.py"
     depends_on:
+      - yt_proxy
       - yt_postgres
       - yt_rabbitmq
       - yt_worker
@@ -42,7 +45,7 @@ services:
     volumes:
       - "shared-tmpfs:/tmp/download_tmpfs"
   yt_worker:
-    container_name: yt_worker
+    container_name: zagruzisuka_worker
     build:
       context: .
       dockerfile: app_worker/Dockerfile
@@ -59,7 +62,7 @@ services:
       - "/data/downloads:/filestorage"
       - "shared-tmpfs:/tmp/download_tmpfs"
   yt_postgres:
-    container_name: yt_postgres
+    container_name: zagruzisuka_postgres
     image: "postgres:15"
     env_file:
       - envs/common.env
@@ -70,15 +73,23 @@ services:
       - pgdata:/var/lib/postgresql/data
   yt_rabbitmq:
     image: "rabbitmq:3.12-management-alpine"
-    container_name: yt_rabbitmq
+    container_name: zagruzisuka_rabbitmq
     ports:
       - "25672:5672"
       - "15672:15672"
     restart: unless-stopped
   yt_redis:
     image: "redis:alpine"
-    container_name: yt_redis
+    container_name: zagruzisuka_redis
     restart: unless-stopped
+
+  yt_proxy:
+    image: metacubex/mihomo:latest
+    container_name: zagruzisuka_proxy
+    restart: unless-stopped
+    volumes:
+      - ./proxy/mihomo.yaml:/root/.config/mihomo/config.yaml
+      - ./proxy/providers:/root/.config/mihomo/providers
 
 volumes:
   pgdata:
