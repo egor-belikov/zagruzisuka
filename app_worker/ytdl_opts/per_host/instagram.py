@@ -19,9 +19,8 @@ class InstagramHost(AbstractHostConfig, metaclass=HostConfRegistry):
     ENCODE_VIDEO = settings.INSTAGRAM_ENCODE_TO_H264
 
     FFMPEG_AUDIO_OPTS = None
-    # Instagram often serves VP9; Telegram on iOS needs H.264/yuv420p.
-    # preset was slow → 5+ min on VPS and hit EncodeToH264Task timeout; veryfast keeps quality OK for social video.
-    FFMPEG_VIDEO_OPTS = 'ffmpeg -y -loglevel error -i "{filepath}" -c:v libx264 -pix_fmt yuv420p -preset veryfast -threads 0 -crf 23 -movflags +faststart -c:a copy "{output}"'
+    # VP9 → H.264 for Telegram/iOS. ultrafast + auto threads: utility-speed on small VPS.
+    FFMPEG_VIDEO_OPTS = 'ffmpeg -y -loglevel error -i "{filepath}" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -threads 0 -crf 24 -movflags +faststart -c:a copy "{output}"'
 
     def build_config(
         self, media_type: DownMediaType, curr_tmp_dir: Path

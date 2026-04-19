@@ -15,11 +15,13 @@ class ProgressDownloadResultWorker(AbstractDownloadResultWorker):
     SCHEMA_CLS = (DownloadProgressPayload,)
 
     async def _process_body(self, body: DownloadProgressPayload) -> bool:
-        text = (
-            f'⬇️ <b>Скачивание</b>\n'
-            f'<code>{html.escape(body.url[:220])}</code>\n'
-            f'{html.escape(body.line)}'
-        )
+        url = html.escape(body.url[:220])
+        detail = (body.line or '').strip()
+        if detail:
+            block = f'<pre>{html.escape(detail[:3500])}</pre>'
+        else:
+            block = ''
+        text = f'⬇️ <b>Загрузка</b>\n<code>{url}</code>\n{block}'
         try:
             await self._bot.edit_message_text(
                 chat_id=body.from_chat_id,

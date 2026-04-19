@@ -40,6 +40,8 @@ class MediaService:
         self._media_payload = media_payload
 
         self._task: Task | None = None
+        self._progress_steps: list[str] = []
+        self._ytdlp_tail: str = ''
 
     async def process(self) -> tuple[DownMedia | None, Task | None]:
         self._task = await self._repository.get_or_create_task(self._media_payload)
@@ -50,8 +52,9 @@ class MediaService:
     async def _process(self) -> DownMedia:
         host_conf = self._get_host_conf()
         await self._repository.save_as_processing(self._task)
-        await self._send_progress_line('⏳ Подключение к источнику…')
+        await self._phase('⏳ Задача в работе, подключение к источнику…')
         media = await self._start_download(host_conf=host_conf)
+        await self._phase('✅ Файл от yt-dlp получен, дальше обработка на сервере…')
         try:
             await self._post_process_media(media=media, host_conf=host_conf)
         except Exception:
@@ -97,9 +100,22 @@ class MediaService:
             from_chat_id=self._media_payload.from_chat_id,
             ack_message_id=self._media_payload.ack_message_id,
             url=self._media_payload.url[:512],
-            line=line[:1024],
+            line=line[:4000],
         )
         await publisher.send_download_progress(payload)
+
+    async def _snapshot_progress_to_user(self) -> None:
+        """Push full timeline + latest yt-dlp line to Telegram (HTML <pre> on bot side)."""
+        parts = self._progress_steps[-20:]
+        body = '\n'.join(parts)
+        if self._ytdlp_tail:
+            body = f'{body}\n── yt-dlp ──\n{self._ytdlp_tail}' if body else self._ytdlp_tail
+        await self._send_progress_line(body)
+
+    async def _phase(self, step: str) -> None:
+        self._progress_steps.append(step)
+        self._log.info('Progress phase: %s', step)
+        await self._snapshot_progress_to_user()
 
     async def _start_download(self, host_conf: AbstractHostConfig) -> DownMedia:
         loop = asyncio.get_running_loop()
@@ -110,12 +126,13 @@ class MediaService:
                 line = MediaService._format_ytdlp_progress_line(d)
                 if not line:
                     return
+                self._ytdlp_tail = line
                 now = time.monotonic()
                 if now - last_ts[0] < 0.9:
                     return
                 last_ts[0] = now
                 fut = asyncio.run_coroutine_threadsafe(
-                    self._send_progress_line(line),
+                    self._snapshot_progress_to_user(),
                     loop,
                 )
 
@@ -171,6 +188,7 @@ class MediaService:
     ) -> None:
         """Post-process downloaded media files, e.g. make thumbnail and copy to storage."""
         video = media.video
+        await self._phase('📋 Проверка метаданных (длительность, разрешение)…')
         # yt-dlp's 'info-meta' may not contain all needed video metadata.
         if not all([video.duration, video.height, video.width]):
             # TODO: Move to higher level and re-raise as DownloadVideoServiceError with task,
@@ -182,39 +200,31 @@ class MediaService:
                     message=str(err), task=self._task
                 ) from None
 
-        coro_tasks = []
-
         video_ar = video.aspect_ratio
         thumb_ar = video.thumb_aspect_ratio
         if not video.thumb_path or all([video_ar, thumb_ar, video_ar != thumb_ar]):
+            await self._phase('🖼 Делаю превью (кадр из видео)…')
             thumb_path = Path(media.root_path) / Path(video.thumb_name)
-            coro_tasks.append(
-                self._create_thumb_task(
-                    file_path=video.current_filepath,
-                    thumb_path=thumb_path,
-                    duration=video.duration,
-                    video_ctx=video,
-                )
-            )
+            await MakeThumbnailTask(
+                thumb_path,
+                video.current_filepath,
+                duration=video.duration,
+                video_ctx=video,
+            ).run()
 
         if self._media_payload.save_to_storage:
-            coro_tasks.append(self._create_copy_file_task(video))
+            await self._phase('📁 Копирование в постоянное хранилище…')
+            await self._copy_file_to_storage(video)
 
         if host_conf.ENCODE_VIDEO:
-            coro_tasks.append(
-                create_task(
-                    EncodeToH264Task(
-                        media=media, cmd_tpl=host_conf.FFMPEG_VIDEO_OPTS
-                    ).run(),
-                    task_name=EncodeToH264Task.__class__.__name__,
-                    logger=self._log,
-                    exception_message='Task "%s" raised an exception',
-                    exception_message_args=(EncodeToH264Task.__class__.__name__,),
-                )
-            )
+            await self._phase('🎞 Конвертация в H.264 для Telegram (короткий проход)…')
+            await EncodeToH264Task(
+                media=media, cmd_tpl=host_conf.FFMPEG_VIDEO_OPTS
+            ).run()
+        else:
+            await self._phase('🎞 Перекодирование не требуется (уже совместимый поток)…')
 
-        await asyncio.gather(*coro_tasks)
-
+        await self._phase('💾 Сохранение в базу и финализация…')
         file = await self._repository.save_file(self._task, media.video, media.meta)
         video.orm_file_id = file.id
 

@@ -15,4 +15,4 @@ class DownloadProgressPayload(StrictBaseConfigModel):
     from_chat_id: int
     ack_message_id: int
     url: Annotated[str, StringConstraints(max_length=512)]
-    line: Annotated[str, StringConstraints(max_length=1024)]
+    line: Annotated[str, StringConstraints(max_length=4000)]

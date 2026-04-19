@@ -21,7 +21,7 @@ class FacebookHost(AbstractHostConfig, metaclass=HostConfRegistry):
     FFMPEG_AUDIO_OPTS = None
     # Facebook returns VP9+AAC in MP4 container for logged users and needs to be
     # encoded to H264 since Telegram doesn't play VP9 on iOS.
-    FFMPEG_VIDEO_OPTS = 'ffmpeg -y -loglevel error -i "{filepath}" -c:v libx264 -pix_fmt yuv420p -preset veryfast -threads 0 -crf 23 -movflags +faststart -c:a copy "{output}"'
+    FFMPEG_VIDEO_OPTS = 'ffmpeg -y -loglevel error -i "{filepath}" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -threads 0 -crf 24 -movflags +faststart -c:a copy "{output}"'
 
     def build_config(
         self, media_type: DownMediaType, curr_tmp_dir: Path
