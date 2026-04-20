@@ -1,13 +1,17 @@
 import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from pyrogram import filters
+from pyrogram.enums import ParseMode
 from pyrogram.handlers import MessageHandler
 from yt_shared.rabbit import get_rabbitmq
 from yt_shared.utils.tasks.tasks import create_task
 
 from bot.bot.client import VideoBotClient
 from bot.core.callbacks import TelegramCallback
+from bot.core.constants import SUPERADMIN_RESTART_NOTIFY_USER_ID
 from bot.core.config.config import get_main_config
 from bot.core.tasks.db_cleanup import DbCleanupTask
 from bot.core.tasks.ytdlp import YtdlpNewVersionNotifyTask
@@ -108,11 +112,26 @@ class BotLauncher:
             exception_message_args=(task_name,),
         )
 
+    async def _notify_superadmin_restart(self) -> None:
+        try:
+            msk = datetime.now(ZoneInfo('Europe/Moscow'))
+            await self._bot.send_message(
+                SUPERADMIN_RESTART_NOTIFY_USER_ID,
+                (
+                    '🔄 Бот перезапущен: '
+                    f'<b>{msk.strftime("%Y-%m-%d %H:%M:%S")}</b> МСК'
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            self._log.debug('Superadmin restart notify failed', exc_info=True)
+
     async def _start_bot(self) -> None:
         """Start telegram bot and related processes."""
         await self._bot.start()
 
         self._log.info('Starting "%s"', (await self._bot.get_me()).first_name)
+        await self._notify_superadmin_restart()
         await self._bot.send_startup_message()
         await self._start_tasks()
         await self._bot.run_forever()

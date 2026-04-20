@@ -77,9 +77,10 @@ class AbstractUploadTask(AbstractTask, ABC):
         self._forward_chat_ids = self._get_forward_chat_ids()
         self._cached_message: Message | None = None
 
-        self._upload_ack_last_edit: float = 0.0
-        self._upload_ack_ref_bytes: int = 0
-        self._upload_ack_ref_mono: float = 0.0
+        self._upload_status_by_chat: dict[int, int] = {}
+        self._upload_line_last_edit: float = 0.0
+        self._upload_line_ref_bytes: int = 0
+        self._upload_line_ref_mono: float = 0.0
         self._upload_session_t0: float | None = None
         self._upload_is_last_target: bool = False
 
@@ -91,7 +92,8 @@ class AbstractUploadTask(AbstractTask, ABC):
 
     async def _run(self) -> None:
         try:
-            await asyncio.gather(*(self._send_upload_text(), self._upload_file()))
+            self._upload_status_by_chat = await self._send_upload_text()
+            await self._upload_file()
         except Exception:
             self._log.exception('Exception in upload task for "%s"', self._filename)
             raise
@@ -103,23 +105,53 @@ class AbstractUploadTask(AbstractTask, ABC):
     def _generate_file_caption(self) -> str:
         return '\n'.join(self._generate_caption_items())[: settings.TG_MAX_CAPTION_SIZE]
 
-    async def _send_upload_text(self) -> None:
-        text = (
-            f'⬆️ {bold("Uploading")} {self._filename}\n'
-            f'📏 {bold("Size")} {self._media_object.file_size_human()}'
+    def _upload_status_intro_html(self) -> str:
+        fname = html.escape(str(self._filename)[:200])
+        size_h = html.escape(self._media_object.file_size_human())
+        return (
+            f'⬆️ <b>Загрузка в Telegram</b>\n'
+            f'<code>{fname}</code>\n'
+            f'📏 <b>Размер</b> {size_h}'
         )
-        coros = []
+
+    async def _send_upload_text(self) -> dict[int, int]:
+        """One status message per recipient chat; edited later with byte progress."""
+        initial = (
+            f'{self._upload_status_intro_html()}\n'
+            f'<pre>{html.escape("подключение…")}</pre>'
+        )
+        out: dict[int, int] = {}
         for user in self._users:
-            if not is_user_upload_silent(user=user, conf=self._bot.conf):
-                kwargs = {
-                    'chat_id': user.id,
-                    'text': text,
-                    'parse_mode': ParseMode.HTML,
-                }
-                if self._ctx.message_id:
-                    kwargs['reply_to_message_id'] = self._ctx.message_id
-                coros.append(self._bot.send_message(**kwargs))
-        await asyncio.gather(*coros)
+            if is_user_upload_silent(user=user, conf=self._bot.conf):
+                continue
+            kwargs: dict = {
+                'chat_id': user.id,
+                'text': initial,
+                'parse_mode': ParseMode.HTML,
+            }
+            if self._ctx.message_id:
+                kwargs['reply_to_message_id'] = self._ctx.message_id
+            msg = await self._bot.send_message(**kwargs)
+            out[user.id] = msg.id
+        return out
+
+    async def _ensure_upload_status_message(self, chat_id: int) -> None:
+        """Forward targets may not have received the initial DM — create a row there."""
+        if chat_id in self._upload_status_by_chat:
+            return
+        initial = (
+            f'{self._upload_status_intro_html()}\n'
+            f'<pre>{html.escape("подключение…")}</pre>'
+        )
+        kwargs: dict = {
+            'chat_id': chat_id,
+            'text': initial,
+            'parse_mode': ParseMode.HTML,
+        }
+        if self._ctx.message_id:
+            kwargs['reply_to_message_id'] = self._ctx.message_id
+        msg = await self._bot.send_message(**kwargs)
+        self._upload_status_by_chat[chat_id] = msg.id
 
     def _get_forward_chat_ids(self) -> list[int]:
         forward_chat_ids = []
@@ -178,9 +210,9 @@ class AbstractUploadTask(AbstractTask, ABC):
         else:
             pct_s = f'{100.0 * current / total:.1f}%'
         parts = [pct_s, f'получатель {chat_id}']
-        if self._upload_ack_ref_mono > 0 and current > self._upload_ack_ref_bytes:
-            dt = now - self._upload_ack_ref_mono
-            db = current - self._upload_ack_ref_bytes
+        if self._upload_line_ref_mono > 0 and current > self._upload_line_ref_bytes:
+            dt = now - self._upload_line_ref_mono
+            db = current - self._upload_line_ref_bytes
             if dt >= 0.08 and db > 0:
                 bps = db / dt
                 parts.append(f'⚡ {self._human_speed(bps)}')
@@ -190,13 +222,12 @@ class AbstractUploadTask(AbstractTask, ABC):
         return ' · '.join(parts)
 
     async def _report_upload_progress(self, current: int, total: int, chat_id: int) -> None:
-        chat_id_body = self._ctx.from_chat_id
-        ack_id = self._ctx.context.ack_message_id
-        if chat_id_body is None or ack_id is None:
+        status_id = self._upload_status_by_chat.get(chat_id)
+        if status_id is None:
             return
         now = time.monotonic()
         done = total > 0 and current >= total
-        if not done and now - self._upload_ack_last_edit < 0.9:
+        if not done and now - self._upload_line_last_edit < 0.9:
             return
 
         line = self._format_upload_progress_line(current, total, chat_id=chat_id, now=now)
@@ -210,26 +241,24 @@ class AbstractUploadTask(AbstractTask, ABC):
                 f'{line} · всего: '
                 f'{self._format_upload_session_total(total_elapsed)}'
             )
-        fname = html.escape(str(self._filename)[:200])
-        detail = f'<pre>{html.escape(line)}</pre>'
-        text = f'⬆️ <b>Загрузка в Telegram</b>\n<code>{fname}</code>\n{detail}'
+        text = f'{self._upload_status_intro_html()}\n<pre>{html.escape(line)}</pre>'
         try:
             await self._bot.edit_message_text(
-                chat_id=chat_id_body,
-                message_id=ack_id,
+                chat_id=chat_id,
+                message_id=status_id,
                 text=text[:4090],
                 parse_mode=ParseMode.HTML,
             )
         except MessageNotModified:
             pass
         except MessageIdInvalid:
-            self._log.debug('Upload progress edit skipped (ack message gone)')
+            self._log.debug('Upload progress edit skipped (status message gone)')
         except Exception:
             self._log.debug('Upload progress edit failed', exc_info=True)
 
-        self._upload_ack_last_edit = now
-        self._upload_ack_ref_bytes = current
-        self._upload_ack_ref_mono = now
+        self._upload_line_last_edit = now
+        self._upload_line_ref_bytes = current
+        self._upload_line_ref_mono = now
 
     def _make_upload_progress(self, chat_id: int):
         async def progress(current: int, total: int) -> None:
@@ -240,8 +269,8 @@ class AbstractUploadTask(AbstractTask, ABC):
     @retry(wait=wait_fixed(3), stop=stop_after_attempt(3), reraise=True)
     async def __upload(self, chat_id: int) -> Message | None:
         self._log.debug('Uploading to "%d" with context: %s', chat_id, self._media_ctx)
-        self._upload_ack_ref_bytes = 0
-        self._upload_ack_ref_mono = time.monotonic()
+        self._upload_line_ref_bytes = 0
+        self._upload_line_ref_mono = time.monotonic()
         return await self._generate_send_media_coroutine(chat_id)
 
     @abstractmethod
@@ -258,6 +287,7 @@ class AbstractUploadTask(AbstractTask, ABC):
         n_targets = len(targets)
         for i, chat_id in enumerate(targets):
             self._upload_is_last_target = i == n_targets - 1
+            await self._ensure_upload_status_message(chat_id)
             self._log.info(
                 'Uploading "%s" [%s] [cached: %s] to chat id "%d"',
                 self._filename,

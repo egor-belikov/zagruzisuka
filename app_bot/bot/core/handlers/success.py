@@ -64,9 +64,9 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
                 chat_id=self._body.from_chat_id,
                 message_id=self._body.context.ack_message_id,
                 text=(
-                    f'⬆️ <b>Загрузка в Telegram</b>\n'
-                    f'<code>{fname}</code>\n'
-                    f'<pre>{html.escape("подготовка…")}</pre>'
+                    f'✅ <b>Скачано.</b> Обработка на сервере и загрузка в Telegram '
+                    f'— прогресс загрузки в <b>отдельном сообщении</b> ниже.\n'
+                    f'<code>{fname}</code>'
                 ),
                 parse_mode=ParseMode.HTML,
             )

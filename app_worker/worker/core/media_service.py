@@ -48,6 +48,7 @@ class MediaService:
         self._ytdlp_session_summary: str | None = None
         self._download_t0: float | None = None
         self._last_db_progress_write: float = 0.0
+        self._publish_user_progress: bool = True
 
     async def process(self) -> tuple[DownMedia | None, Task | None]:
         self._task = await self._repository.get_or_create_task(self._media_payload)
@@ -58,9 +59,10 @@ class MediaService:
     async def _process(self) -> DownMedia:
         host_conf = self._get_host_conf()
         await self._repository.save_as_processing(self._task)
-        await self._phase('⏳ Задача в работе, подключение к источнику…')
+        await self._phase('⏳ Подключение к источнику, подготовка к скачиванию…')
         media = await self._start_download(host_conf=host_conf)
         await self._phase('✅ Файл от yt-dlp получен, дальше обработка на сервере…')
+        self._publish_user_progress = False
         try:
             await self._post_process_media(media=media, host_conf=host_conf)
         except Exception:
@@ -96,16 +98,36 @@ class MediaService:
         return ' '.join(parts)
 
     @staticmethod
+    def _ytdlp_stream_role(d: dict) -> str:
+        """Rough label for which DASH/stream fragment yt-dlp is writing (RU)."""
+        fn = str(d.get('filename') or d.get('tmpfilename') or '').lower()
+        if not fn:
+            return 'данные'
+        base = fn.rsplit('/', maxsplit=1)[-1]
+        if '.f' in base:
+            if any(
+                base.endswith(ext)
+                for ext in ('.m4a', '.opus', '.aac', '.mp3', '.oga', '.webm')
+            ):
+                if base.endswith('.webm') and 'dash' in fn:
+                    return 'видеодорожка'
+                return 'аудиодорожка'
+            if any(base.endswith(ext) for ext in ('.mp4', '.mkv', '.mov', '.webm')):
+                return 'видеодорожка'
+        return 'поток'
+
+    @staticmethod
     def _format_ytdlp_progress_line(d: dict) -> str | None:
         st = d.get('status')
         if st == 'finished':
-            return 'Файл собран, финализация…'
+            return 'Файл собран, слияние / запись на диск…'
         if st == 'extracting':
             return 'Получение метаданных…'
         if st in ('postprocessing', 'processing'):
-            return 'Постобработка…'
+            return 'Постобработка (ffmpeg)…'
         if st != 'downloading':
             return None
+        role = MediaService._ytdlp_stream_role(d)
         parts: list[str] = []
         if p := d.get('_percent_str'):
             parts.append(p.strip())
@@ -113,7 +135,8 @@ class MediaService:
             parts.append(f'⚡ {s.strip()}')
         if e := d.get('_eta_str'):
             parts.append(f'ETA {e.strip()}')
-        return ' · '.join(parts) if parts else 'Скачивание…'
+        tail = ' · '.join(parts) if parts else 'идёт приём данных…'
+        return f'Скачивание ({role}): {tail}'
 
     def _bump_ytdlp_line(self, new_line: str) -> None:
         """Keep a single live yt-dlp line (no history per percent tick)."""
@@ -152,15 +175,16 @@ class MediaService:
             return
         if self._media_payload.from_chat_id is None:
             return
-        publisher = RmqPublisher()
-        payload = DownloadProgressPayload(
-            task_id=self._task.id,
-            from_chat_id=self._media_payload.from_chat_id,
-            ack_message_id=self._media_payload.ack_message_id,
-            url=self._media_payload.url[:512],
-            line=line[:4000],
-        )
-        await publisher.send_download_progress(payload)
+        if self._publish_user_progress:
+            publisher = RmqPublisher()
+            payload = DownloadProgressPayload(
+                task_id=self._task.id,
+                from_chat_id=self._media_payload.from_chat_id,
+                ack_message_id=self._media_payload.ack_message_id,
+                url=self._media_payload.url[:512],
+                line=line[:4000],
+            )
+            await publisher.send_download_progress(payload)
         now = time.monotonic()
         if now - self._last_db_progress_write >= self._DB_PROGRESS_MIN_INTERVAL:
             self._last_db_progress_write = now
