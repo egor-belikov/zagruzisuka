@@ -45,6 +45,7 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             await asyncio.gather(*coro_tasks)
         finally:
             await self._delete_acknowledgment_message()
+            await self._delete_pipeline_log_message()
 
     async def _delete_acknowledgment_message(self) -> None:
         if self._body.from_chat_id and self._body.context.ack_message_id:
@@ -52,6 +53,17 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
                 chat_id=self._body.from_chat_id,
                 message_ids=self._body.context.ack_message_id,
             )
+
+    async def _delete_pipeline_log_message(self) -> None:
+        mid = self._body.context.pipeline_log_message_id
+        if self._body.from_chat_id and mid:
+            try:
+                await self._bot.delete_messages(
+                    chat_id=self._body.from_chat_id,
+                    message_ids=mid,
+                )
+            except Exception:
+                self._log.debug('Pipeline log message delete failed', exc_info=True)
 
     async def _publish_error_message(self, err: Exception) -> None:
         err_payload = ErrorDownloadGeneralPayload(

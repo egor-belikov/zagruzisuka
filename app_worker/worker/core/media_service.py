@@ -47,6 +47,9 @@ class MediaService:
         self._phase_started: float = 0.0
         self._ytdlp_tail: str = ''
         self._ytdlp_session_summary: str | None = None
+        self._ytdlp_segment_lines: list[str] = []
+        self._ytdlp_segment_kind: str | None = None
+        self._ytdlp_segment_started: float = 0.0
         self._download_t0: float | None = None
         self._last_db_progress_write: float = 0.0
         self._publish_user_progress: bool = True
@@ -151,14 +154,51 @@ class MediaService:
             return
         self._ytdlp_tail = new_line
 
+    @staticmethod
+    def _normalize_ytdlp_kind(role_label: str) -> str | None:
+        if 'видео' in role_label:
+            return 'video'
+        if 'аудио' in role_label:
+            return 'audio'
+        return None
+
+    def _sync_close_ytdlp_segment(self) -> None:
+        if self._ytdlp_segment_kind is None or self._ytdlp_segment_started <= 0:
+            self._ytdlp_segment_kind = None
+            self._ytdlp_segment_started = 0.0
+            return
+        elapsed = time.monotonic() - self._ytdlp_segment_started
+        label = (
+            'видеодорожки'
+            if self._ytdlp_segment_kind == 'video'
+            else 'аудиодорожки'
+        )
+        self._ytdlp_segment_lines.append(
+            f'Скачивание {label}: {self._format_phase_duration(elapsed)}'
+        )
+        self._ytdlp_segment_kind = None
+        self._ytdlp_segment_started = 0.0
+
+    def _sync_ensure_ytdlp_segment(self, kind: str) -> bool:
+        """Start or switch DASH segment timer; returns True if segment boundary crossed."""
+        if kind == self._ytdlp_segment_kind:
+            return False
+        self._sync_close_ytdlp_segment()
+        self._ytdlp_segment_kind = kind
+        self._ytdlp_segment_started = time.monotonic()
+        return True
+
     def _finalize_ytdlp_section(self) -> None:
+        self._sync_close_ytdlp_segment()
         self._ytdlp_tail = ''
-        if self._download_t0 is not None:
+        if not self._ytdlp_segment_lines and self._download_t0 is not None:
             elapsed = time.monotonic() - self._download_t0
             self._ytdlp_session_summary = (
                 f'Скачивание (yt-dlp), всего: {self._format_session_duration(elapsed)}'
             )
-            self._download_t0 = None
+        elif self._ytdlp_segment_lines:
+            self._ytdlp_session_summary = None
+        self._download_t0 = None
 
     def _compose_progress_body(self) -> str:
         lines = list(self._phase_labels)
@@ -166,6 +206,7 @@ class MediaService:
             lines.append(self._current_phase_label)
         body = '\n'.join(lines)
         y_parts: list[str] = []
+        y_parts.extend(self._ytdlp_segment_lines)
         if self._ytdlp_session_summary:
             y_parts.append(self._ytdlp_session_summary)
         if self._ytdlp_tail:
@@ -188,6 +229,7 @@ class MediaService:
                 task_id=self._task.id,
                 from_chat_id=self._media_payload.from_chat_id,
                 ack_message_id=self._media_payload.ack_message_id,
+                pipeline_log_message_id=self._media_payload.pipeline_log_message_id,
                 url=self._media_payload.url[:512],
                 line=line[:4000],
             )
@@ -230,33 +272,58 @@ class MediaService:
         await self._snapshot_progress_to_user()
 
     async def _start_download(self, host_conf: AbstractHostConfig) -> DownMedia:
+        await self._finalize_current_phase()
         loop = asyncio.get_running_loop()
         last_ts = [0.0]
 
+        def _schedule_snapshot(*, force: bool) -> None:
+            now = time.monotonic()
+            if not force and now - last_ts[0] < 0.9:
+                return
+            last_ts[0] = now
+            fut = asyncio.run_coroutine_threadsafe(
+                self._snapshot_progress_to_user(),
+                loop,
+            )
+
+            def _done(f: asyncio.Future) -> None:
+                try:
+                    exc = f.exception()
+                except asyncio.CancelledError:
+                    return
+                if exc:
+                    self._log.debug('progress publish failed: %s', exc)
+
+            fut.add_done_callback(_done)
+
         def progress_hook(d: dict) -> None:
             try:
+                st = d.get('status')
+                if st in ('finished', 'postprocessing', 'processing'):
+                    self._sync_close_ytdlp_segment()
+                    line = MediaService._format_ytdlp_progress_line(d)
+                    if line:
+                        self._bump_ytdlp_line(line)
+                    _schedule_snapshot(force=True)
+                    return
+                if st == 'downloading':
+                    role_label = MediaService._ytdlp_stream_role(d)
+                    kind = MediaService._normalize_ytdlp_kind(role_label)
+                    if kind:
+                        boundary = self._sync_ensure_ytdlp_segment(kind)
+                    else:
+                        boundary = False
+                    line = MediaService._format_ytdlp_progress_line(d)
+                    if not line:
+                        return
+                    self._bump_ytdlp_line(line)
+                    _schedule_snapshot(force=boundary)
+                    return
                 line = MediaService._format_ytdlp_progress_line(d)
                 if not line:
                     return
                 self._bump_ytdlp_line(line)
-                now = time.monotonic()
-                if now - last_ts[0] < 0.9:
-                    return
-                last_ts[0] = now
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._snapshot_progress_to_user(),
-                    loop,
-                )
-
-                def _done(f: asyncio.Future) -> None:
-                    try:
-                        exc = f.exception()
-                    except asyncio.CancelledError:
-                        return
-                    if exc:
-                        self._log.debug('progress publish failed: %s', exc)
-
-                fut.add_done_callback(_done)
+                _schedule_snapshot(force=False)
             except Exception:
                 return
 
@@ -277,6 +344,7 @@ class MediaService:
             await self._handle_download_exception(err)
             raise DownloadVideoServiceError(message=str(err), task=self._task) from None
         self._finalize_ytdlp_section()
+        await self._snapshot_progress_to_user()
         return media
 
     async def _post_process_media(

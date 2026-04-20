@@ -14,5 +14,6 @@ class URL(StrictRealBaseModel):
     from_user_id: int | None
     message_id: int
     ack_message_id: int
+    pipeline_log_message_id: int | None = None
     save_to_storage: bool
     download_media_type: DownMediaType

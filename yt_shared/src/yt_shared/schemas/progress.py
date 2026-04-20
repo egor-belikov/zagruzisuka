@@ -14,5 +14,6 @@ class DownloadProgressPayload(StrictBaseConfigModel):
     task_id: uuid.UUID
     from_chat_id: int
     ack_message_id: int
+    pipeline_log_message_id: int | None = None
     url: Annotated[str, StringConstraints(max_length=512)]
     line: Annotated[str, StringConstraints(max_length=4000)]

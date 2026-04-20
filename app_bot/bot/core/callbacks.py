@@ -5,6 +5,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified
 from pyrogram.types import Message
 from yt_shared.emoji import SUCCESS_EMOJI
+from yt_shared.schemas.url import URL
 from yt_shared.utils.tasks.tasks import create_task as bg_create_task
 
 from bot.bot.client import VideoBotClient
@@ -124,11 +125,24 @@ class TelegramCallback:
         )
         context = {'message': message, 'user': user, 'ack_message': ack_message}
         url_objects = self._url_parser.parse_urls(urls=urls, context=context)
-        await self._url_service.process_urls(url_objects)
-        if url_objects:
+        enriched_urls: list[URL] = []
+        for u in url_objects:
+            log_msg = await message.reply(
+                text=(
+                    '<b>Лог скачивания и обработки</b>\n'
+                    '<pre>⏳ Журнал обновляется по этапам…</pre>'
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=message.id,
+            )
+            enriched_urls.append(
+                u.model_copy(update={'pipeline_log_message_id': log_msg.id})
+            )
+        await self._url_service.process_urls(enriched_urls)
+        if enriched_urls:
             try:
                 n = await download_workflow_backlog_count()
-                base = self._format_acknowledge_text(len(url_objects))
+                base = self._format_acknowledge_text(len(enriched_urls))
                 await ack_message.edit_text(
                     text=f'{base}\n\n📊 <b>Очередь</b>: сейчас ~{n} задач(и) впереди (включая эту)',
                     parse_mode=ParseMode.HTML,

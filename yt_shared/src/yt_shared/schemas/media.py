@@ -24,6 +24,7 @@ class InbMediaPayload(StrictRealBaseModel):
     from_user_id: int | None
     message_id: int | None
     ack_message_id: int | None
+    pipeline_log_message_id: int | None = None
     url: str
     original_url: str
     source: TaskSource

@@ -29,6 +29,7 @@ class UrlService:
             original_url=url.original_url,
             message_id=url.message_id,
             ack_message_id=url.ack_message_id,
+            pipeline_log_message_id=url.pipeline_log_message_id,
             from_user_id=url.from_user_id,
             from_chat_id=url.from_chat_id,
             from_chat_type=url.from_chat_type,

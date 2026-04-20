@@ -32,7 +32,17 @@ class ErrorDownloadHandler(AbstractDownloadHandler):
     }
 
     async def handle(self) -> None:
+        await self._delete_pipeline_log_message()
         self._send_error_text()
+
+    async def _delete_pipeline_log_message(self) -> None:
+        mid = self._body.context.pipeline_log_message_id
+        chat = self._body.from_chat_id
+        if chat and mid:
+            try:
+                await self._bot.delete_messages(chat_id=chat, message_ids=mid)
+            except Exception:
+                self._log.debug('Pipeline log message delete failed', exc_info=True)
 
     def _send_error_text(self) -> None:
         for user in self._get_receiving_users():
