@@ -186,8 +186,6 @@ class MediaService:
         if self._current_phase_label is None:
             return
         self._phase_labels.append(self._current_phase_label)
-        if 'Файл от yt-dlp получен' in self._current_phase_label:
-            self._ytdlp_session_summary = None
         self._current_phase_label = None
         await self._snapshot_progress_to_user()
 
