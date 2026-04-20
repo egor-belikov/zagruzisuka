@@ -201,22 +201,40 @@ class MediaService:
         self._download_t0 = None
 
     def _compose_progress_body(self) -> str:
-        lines = list(self._phase_labels)
-        if self._current_phase_label:
-            lines.append(self._current_phase_label)
-        body = '\n'.join(lines)
+        """Console-like order: pre-yt-dlp phases, yt-dlp (video/audio), then post phases."""
+        marker = 'Файл от yt-dlp получен'
+        split_idx = None
+        for i, lab in enumerate(self._phase_labels):
+            if marker in lab:
+                split_idx = i
+                break
+        if split_idx is None:
+            pre = list(self._phase_labels)
+            post: list[str] = []
+        else:
+            pre = self._phase_labels[:split_idx]
+            post = self._phase_labels[split_idx:]
+
         y_parts: list[str] = []
         y_parts.extend(self._ytdlp_segment_lines)
         if self._ytdlp_session_summary:
             y_parts.append(self._ytdlp_session_summary)
         if self._ytdlp_tail:
             y_parts.append(self._ytdlp_tail)
-        if y_parts:
-            yblock = '\n'.join(y_parts)
-            body = (
-                f'{body}\n── yt-dlp ──\n{yblock}' if body else f'── yt-dlp ──\n{yblock}'
-            )
-        return body
+        yblock = '\n'.join(y_parts)
+
+        bottom: list[str] = list(post)
+        if self._current_phase_label:
+            bottom.append(self._current_phase_label)
+
+        sections: list[str] = []
+        if s := '\n'.join(pre).strip():
+            sections.append(s)
+        if s := yblock.strip():
+            sections.append(s)
+        if s := '\n'.join(bottom).strip():
+            sections.append(s)
+        return '\n'.join(sections)
 
     async def _send_progress_line(self, line: str) -> None:
         if self._media_payload.ack_message_id is None:
