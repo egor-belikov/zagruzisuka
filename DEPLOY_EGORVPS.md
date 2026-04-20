@@ -2,6 +2,7 @@
 
 ## Лимиты в проекте
 
+- Раньше в compose стояло **~27 GiB tmpfs** — это был **потолок RAM-диска для временных файлов** во время скачивания/обработки, а не «вес проекта» и не склад готовых роликов на диске.
 - **tmpfs** для временных файлов yt-dlp: **10 GiB** (`docker-compose.yml`, `shared-tmpfs`).
 - **Один файл** с yt-dlp: до **~9 GiB** (`envs/worker.egorvps.env`, `YTDLP_MAX_FILESIZE_BYTES`).
 - **Постоянные загрузки** (`/filestorage`): именованный том `zagruzisuka_filestorage` в `docker-compose.egorvps.yml` (не общий хостовый `/data/downloads` с другими проектами).
@@ -30,3 +31,7 @@ docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 ## Том Postgres
 
 Как и раньше: внешний том `yt_pgdata` (`docker-compose.yml`). На новом сервере: `docker volume create yt_pgdata` или перенос данных.
+
+## Удаление после отправки в Telegram
+
+После успешной (или неуспешной) обработки сценария бот в `SuccessDownloadHandler._cleanup()` вызывает `remove_dir(self._body.media.root_path)` — каталог задачи с исходным видео и временными файлами **удаляется** в `finally` после `await` загрузки в Telegram (`upload_task` дожидается завершения). Отдельно **остаются** только копии в `STORAGE_PATH` (`/filestorage`), если у пользователя включено `save_to_storage` — это отдельное постоянное хранилище по настройке.
