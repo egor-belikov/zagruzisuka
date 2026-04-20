@@ -45,7 +45,6 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             await asyncio.gather(*coro_tasks)
         finally:
             await self._delete_acknowledgment_message()
-            await self._delete_pipeline_log_message()
 
     async def _delete_acknowledgment_message(self) -> None:
         if self._body.from_chat_id and self._body.context.ack_message_id:
@@ -53,17 +52,6 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
                 chat_id=self._body.from_chat_id,
                 message_ids=self._body.context.ack_message_id,
             )
-
-    async def _delete_pipeline_log_message(self) -> None:
-        mid = self._body.context.pipeline_log_message_id
-        if self._body.from_chat_id and mid:
-            try:
-                await self._bot.delete_messages(
-                    chat_id=self._body.from_chat_id,
-                    message_ids=mid,
-                )
-            except Exception:
-                self._log.debug('Pipeline log message delete failed', exc_info=True)
 
     async def _publish_error_message(self, err: Exception) -> None:
         err_payload = ErrorDownloadGeneralPayload(
@@ -83,15 +71,18 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
 
     async def _handle_media_object(self, media_object: BaseMedia) -> None:
         try:
-            await self._send_success_text(media_object)
+            has_pipeline = self._body.context.pipeline_log_message_id is not None
             if self._upload_is_enabled():
                 self._validate_file_size_for_upload(media_object)
+                if not has_pipeline:
+                    await self._send_success_text(media_object)
                 await self._create_upload_task(media_object)
             else:
                 self._log.warning(
                     'File "%s" will not be uploaded due to upload configuration',
                     media_object.current_filepath,
                 )
+                await self._send_success_text(media_object)
         except Exception as err:
             self._log.exception('Upload of "%s" failed', media_object.current_filepath)
             await self._publish_error_message(err)
@@ -131,7 +122,7 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             text = f'{text}\n💾 {bold("Saved to media storage")}'
         text = f'{text}\n📏 {bold("Size")} {media_object.file_size_human()}'
         log = (self._body.progress_log or '').strip()
-        if log:
+        if log and self._body.context.pipeline_log_message_id is None:
             safe = html.escape(log[:3400])
             text = f'{text}\n\n<b>Лог скачивания и обработки</b>\n<pre>{safe}</pre>'
         return text
