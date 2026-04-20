@@ -1,0 +1,70 @@
+# Слабый VPS: низкий приоритет CPU/IO относительно других стеков (kinodolgoletie и т.д.),
+# лимиты RAM и отдельный том под /filestorage (без привязки к чужому /data/downloads).
+#
+# Запуск:
+#   docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
+# Сборка без перегруза (см. scripts/build-low-resource.sh):
+#   ./scripts/build-low-resource.sh
+#
+# cpu_shares: ниже 1024 — при нехватке CPU планировщик отдаёт ядра другим контейнерам/стекам.
+# При необходимости снизить приоритет I/O воркера на хосте: systemd slice или cgroup v2 io.weight.
+
+services:
+  yt_api:
+    cpus: "0.75"
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpu_shares: 200
+    pids_limit: 256
+
+  yt_bot:
+    cpus: "0.75"
+    mem_limit: 768m
+    mem_reservation: 128m
+    cpu_shares: 200
+    pids_limit: 256
+
+  yt_worker:
+    cpus: "2.5"
+    mem_limit: 4g
+    mem_reservation: 512m
+    cpu_shares: 128
+    pids_limit: 512
+    env_file:
+      - envs/common.env
+      - envs/worker.env
+      - envs/worker.egorvps.env
+    volumes:
+      - zagruzisuka_filestorage:/filestorage
+      - shared-tmpfs:/tmp/download_tmpfs
+
+  yt_postgres:
+    cpus: "0.75"
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpu_shares: 300
+    pids_limit: 256
+
+  yt_rabbitmq:
+    cpus: "0.5"
+    mem_limit: 384m
+    mem_reservation: 64m
+    cpu_shares: 250
+    pids_limit: 256
+
+  yt_redis:
+    cpus: "0.25"
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpu_shares: 200
+    pids_limit: 128
+
+  yt_proxy:
+    cpus: "0.35"
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpu_shares: 150
+    pids_limit: 128
+
+volumes:
+  zagruzisuka_filestorage:
