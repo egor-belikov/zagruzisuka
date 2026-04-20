@@ -77,6 +77,12 @@ class AbstractUploadTask(AbstractTask, ABC):
         self._forward_chat_ids = self._get_forward_chat_ids()
         self._cached_message: Message | None = None
 
+        self._upload_ack_last_edit: float = 0.0
+        self._upload_ack_ref_bytes: int = 0
+        self._upload_ack_ref_mono: float = 0.0
+        self._upload_session_t0: float | None = None
+        self._upload_is_last_target: bool = False
+
     async def run(self) -> None:
         async with self._semaphore:
             self._log.debug('Semaphore for "%s" acquired', self._filename)
@@ -135,6 +141,25 @@ class AbstractUploadTask(AbstractTask, ABC):
         return f'{bps:.0f} B/s'
 
     @staticmethod
+    def _format_upload_session_total(seconds: float) -> str:
+        if seconds < 0 or seconds != seconds:
+            return '—'
+        rounded = max(0.0, round(seconds * 5) / 5)
+        if rounded < 60:
+            return f'{rounded:.1f} с'
+        total = int(round(rounded))
+        m, sec = divmod(total, 60)
+        if m < 60:
+            return f'{m} м {sec} с' if sec else f'{m} м'
+        h, m = divmod(m, 60)
+        parts: list[str] = [f'{h} ч']
+        if m:
+            parts.append(f'{m} м')
+        if sec:
+            parts.append(f'{sec} с')
+        return ' '.join(parts)
+
+    @staticmethod
     def _format_eta(seconds: float) -> str:
         if seconds < 0 or seconds > 86400 * 2 or seconds != seconds:  # NaN
             return '—'
@@ -175,6 +200,16 @@ class AbstractUploadTask(AbstractTask, ABC):
             return
 
         line = self._format_upload_progress_line(current, total, chat_id=chat_id, now=now)
+        if (
+            done
+            and self._upload_is_last_target
+            and self._upload_session_t0 is not None
+        ):
+            total_elapsed = now - self._upload_session_t0
+            line = (
+                f'{line} · всего: '
+                f'{self._format_upload_session_total(total_elapsed)}'
+            )
         fname = html.escape(str(self._filename)[:200])
         detail = f'<pre>{html.escape(line)}</pre>'
         text = f'⬆️ <b>Загрузка в Telegram</b>\n<code>{fname}</code>\n{detail}'
@@ -218,7 +253,11 @@ class AbstractUploadTask(AbstractTask, ABC):
         pass
 
     async def _upload_file(self) -> None:
-        for chat_id in chain((u.id for u in self._users), self._forward_chat_ids):
+        targets = list(chain((u.id for u in self._users), self._forward_chat_ids))
+        self._upload_session_t0 = time.monotonic()
+        n_targets = len(targets)
+        for i, chat_id in enumerate(targets):
+            self._upload_is_last_target = i == n_targets - 1
             self._log.info(
                 'Uploading "%s" [%s] [cached: %s] to chat id "%d"',
                 self._filename,

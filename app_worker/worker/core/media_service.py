@@ -44,10 +44,9 @@ class MediaService:
         self._task: Task | None = None
         self._phase_labels: list[str] = []
         self._current_phase_label: str | None = None
-        self._phase_started: float = 0.0
-        self._ytdlp_done_lines: list[str] = []
         self._ytdlp_tail: str = ''
-        self._ytdlp_line_started: float = 0.0
+        self._ytdlp_session_summary: str | None = None
+        self._download_t0: float | None = None
         self._last_db_progress_write: float = 0.0
 
     async def process(self) -> tuple[DownMedia | None, Task | None]:
@@ -77,10 +76,24 @@ class MediaService:
         return host_cls(url=url)
 
     @staticmethod
-    def _format_phase_duration(seconds: float) -> str:
-        """Round to 0.2 s steps for display (e.g. 1.23 → 1.2)."""
-        rounded = round(seconds * 5) / 5
-        return f'{rounded:.1f}s'
+    def _format_session_duration(seconds: float) -> str:
+        """Human-readable total duration (Russian)."""
+        if seconds < 0 or seconds != seconds:
+            return '—'
+        rounded = max(0.0, round(seconds * 5) / 5)
+        if rounded < 60:
+            return f'{rounded:.1f} с'
+        total = int(round(rounded))
+        m, sec = divmod(total, 60)
+        if m < 60:
+            return f'{m} м {sec} с' if sec else f'{m} м'
+        h, m = divmod(m, 60)
+        parts: list[str] = [f'{h} ч']
+        if m:
+            parts.append(f'{m} м')
+        if sec:
+            parts.append(f'{sec} с')
+        return ' '.join(parts)
 
     @staticmethod
     def _format_ytdlp_progress_line(d: dict) -> str | None:
@@ -103,29 +116,19 @@ class MediaService:
         return ' · '.join(parts) if parts else 'Скачивание…'
 
     def _bump_ytdlp_line(self, new_line: str) -> None:
-        now = time.monotonic()
+        """Keep a single live yt-dlp line (no history per percent tick)."""
         if new_line == self._ytdlp_tail:
             return
-        if self._ytdlp_tail:
-            dur = now - self._ytdlp_line_started
-            if dur >= 0.05:
-                self._ytdlp_done_lines.append(
-                    f'{self._ytdlp_tail} ({self._format_phase_duration(dur)})'
-                )
-                self._ytdlp_done_lines = self._ytdlp_done_lines[-12:]
         self._ytdlp_tail = new_line
-        self._ytdlp_line_started = now
 
     def _finalize_ytdlp_section(self) -> None:
-        if not self._ytdlp_tail:
-            return
-        now = time.monotonic()
-        dur = now - self._ytdlp_line_started
-        self._ytdlp_done_lines.append(
-            f'{self._ytdlp_tail} ({self._format_phase_duration(dur)})'
-        )
-        self._ytdlp_done_lines = self._ytdlp_done_lines[-12:]
         self._ytdlp_tail = ''
+        if self._download_t0 is not None:
+            elapsed = time.monotonic() - self._download_t0
+            self._ytdlp_session_summary = (
+                f'Скачивание (yt-dlp), всего: {self._format_session_duration(elapsed)}'
+            )
+            self._download_t0 = None
 
     def _compose_progress_body(self) -> str:
         lines = list(self._phase_labels)
@@ -133,7 +136,8 @@ class MediaService:
             lines.append(self._current_phase_label)
         body = '\n'.join(lines)
         y_parts: list[str] = []
-        y_parts.extend(self._ytdlp_done_lines)
+        if self._ytdlp_session_summary:
+            y_parts.append(self._ytdlp_session_summary)
         if self._ytdlp_tail:
             y_parts.append(self._ytdlp_tail)
         if y_parts:
@@ -170,25 +174,20 @@ class MediaService:
         await self._send_progress_line(self._compose_progress_body())
 
     async def _phase(self, step: str) -> None:
-        now = time.monotonic()
         if self._current_phase_label is not None:
-            dur = now - self._phase_started
-            self._phase_labels.append(
-                f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
-            )
+            self._phase_labels.append(self._current_phase_label)
+            if 'Файл от yt-dlp получен' in self._current_phase_label:
+                self._ytdlp_session_summary = None
         self._current_phase_label = step
-        self._phase_started = now
         self._log.info('Progress phase: %s', step)
         await self._snapshot_progress_to_user()
 
     async def _finalize_current_phase(self) -> None:
         if self._current_phase_label is None:
             return
-        now = time.monotonic()
-        dur = now - self._phase_started
-        self._phase_labels.append(
-            f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
-        )
+        self._phase_labels.append(self._current_phase_label)
+        if 'Файл от yt-dlp получен' in self._current_phase_label:
+            self._ytdlp_session_summary = None
         self._current_phase_label = None
         await self._snapshot_progress_to_user()
 
@@ -223,6 +222,7 @@ class MediaService:
             except Exception:
                 return
 
+        self._download_t0 = time.monotonic()
         try:
             media = await loop.run_in_executor(
                 None,
