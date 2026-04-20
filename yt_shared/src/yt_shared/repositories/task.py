@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Column, Row, delete, desc, distinct, func, insert, select
+from sqlalchemy import Column, Row, delete, desc, distinct, func, insert, select, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -79,6 +79,8 @@ class TaskRepository:
 
     async def save_as_done(self, task: Task) -> None:
         task.status = TaskStatus.DONE
+        task.progress_snapshot = None
+        task.progress_updated_at = None
         await self._db.commit()
 
     async def save_as_processing(self, task: Task) -> None:
@@ -88,7 +90,36 @@ class TaskRepository:
     async def save_as_failed(self, task: Task, error_message: str) -> None:
         task.status = TaskStatus.FAILED
         task.error = error_message
+        task.progress_snapshot = None
+        task.progress_updated_at = None
         await self._db.commit()
+
+    async def update_task_progress_snapshot(self, task_id: UUID, line: str) -> None:
+        stmt = (
+            update(Task)
+            .where(Task.id == task_id)
+            .values(progress_snapshot=line[:8000], progress_updated_at=func.now())
+        )
+        await self._db.execute(stmt)
+        await self._db.commit()
+
+    async def list_active_tasks_for_queue(
+        self,
+        *,
+        viewer_user_id: int | None,
+        include_all_users: bool,
+        limit: int,
+    ) -> list[Task]:
+        stmt = (
+            select(Task)
+            .where(Task.status.in_((TaskStatus.PENDING, TaskStatus.PROCESSING)))
+            .order_by(Task.added_at.asc())
+            .limit(limit)
+        )
+        if not include_all_users and viewer_user_id is not None:
+            stmt = stmt.where(Task.from_user_id == viewer_user_id)
+        res = await self._db.execute(stmt)
+        return list(res.scalars().all())
 
     async def purge_user_tasks(self, user_ids: Sequence[int]) -> None:
         await self._db.execute(

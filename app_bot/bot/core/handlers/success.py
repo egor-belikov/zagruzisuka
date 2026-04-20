@@ -1,4 +1,5 @@
 import asyncio
+import html
 import traceback
 from typing import Any, ClassVar
 
@@ -58,10 +59,16 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             return
 
         try:
+            fname = html.escape(str(media_object.current_filename)[:200])
             await self._bot.edit_message_text(
                 chat_id=self._body.from_chat_id,
                 message_id=self._body.context.ack_message_id,
-                text=f'⬆️ {bold(f"Uploading {media_object.file_size_human()}")}',
+                text=(
+                    f'⬆️ <b>Загрузка в Telegram</b>\n'
+                    f'<code>{fname}</code>\n'
+                    f'<pre>{html.escape("подготовка…")}</pre>'
+                ),
+                parse_mode=ParseMode.HTML,
             )
         except (MessageIdInvalid, MessageNotModified) as err:
             # Expected behaviour when several links where pasted in one message and
@@ -93,11 +100,8 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             await self._send_success_text(media_object)
             if self._upload_is_enabled():
                 self._validate_file_size_for_upload(media_object)
-                coros = (
-                    self._create_upload_task(media_object),
-                    self._set_upload_message(media_object),
-                )
-                await asyncio.gather(*coros)
+                await self._set_upload_message(media_object)
+                await self._create_upload_task(media_object)
             else:
                 self._log.warning(
                     'File "%s" will not be uploaded due to upload configuration',

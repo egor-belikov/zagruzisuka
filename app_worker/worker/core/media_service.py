@@ -28,6 +28,8 @@ from ytdl_opts.per_host._registry import HostConfRegistry
 
 
 class MediaService:
+    _DB_PROGRESS_MIN_INTERVAL: float = 0.5
+
     def __init__(
         self,
         media_payload: InbMediaPayload,
@@ -40,8 +42,13 @@ class MediaService:
         self._media_payload = media_payload
 
         self._task: Task | None = None
-        self._progress_steps: list[str] = []
+        self._phase_labels: list[str] = []
+        self._current_phase_label: str | None = None
+        self._phase_started: float = 0.0
+        self._ytdlp_done_lines: list[str] = []
         self._ytdlp_tail: str = ''
+        self._ytdlp_line_started: float = 0.0
+        self._last_db_progress_write: float = 0.0
 
     async def process(self) -> tuple[DownMedia | None, Task | None]:
         self._task = await self._repository.get_or_create_task(self._media_payload)
@@ -70,6 +77,12 @@ class MediaService:
         return host_cls(url=url)
 
     @staticmethod
+    def _format_phase_duration(seconds: float) -> str:
+        """Round to 0.2 s steps for display (e.g. 1.23 → 1.2)."""
+        rounded = round(seconds * 5) / 5
+        return f'{rounded:.1f}s'
+
+    @staticmethod
     def _format_ytdlp_progress_line(d: dict) -> str | None:
         st = d.get('status')
         if st == 'finished':
@@ -89,6 +102,47 @@ class MediaService:
             parts.append(f'ETA {e.strip()}')
         return ' · '.join(parts) if parts else 'Скачивание…'
 
+    def _bump_ytdlp_line(self, new_line: str) -> None:
+        now = time.monotonic()
+        if new_line == self._ytdlp_tail:
+            return
+        if self._ytdlp_tail:
+            dur = now - self._ytdlp_line_started
+            if dur >= 0.05:
+                self._ytdlp_done_lines.append(
+                    f'{self._ytdlp_tail} ({self._format_phase_duration(dur)})'
+                )
+                self._ytdlp_done_lines = self._ytdlp_done_lines[-12:]
+        self._ytdlp_tail = new_line
+        self._ytdlp_line_started = now
+
+    def _finalize_ytdlp_section(self) -> None:
+        if not self._ytdlp_tail:
+            return
+        now = time.monotonic()
+        dur = now - self._ytdlp_line_started
+        self._ytdlp_done_lines.append(
+            f'{self._ytdlp_tail} ({self._format_phase_duration(dur)})'
+        )
+        self._ytdlp_done_lines = self._ytdlp_done_lines[-12:]
+        self._ytdlp_tail = ''
+
+    def _compose_progress_body(self) -> str:
+        lines = list(self._phase_labels)
+        if self._current_phase_label:
+            lines.append(self._current_phase_label)
+        body = '\n'.join(lines)
+        y_parts: list[str] = []
+        y_parts.extend(self._ytdlp_done_lines)
+        if self._ytdlp_tail:
+            y_parts.append(self._ytdlp_tail)
+        if y_parts:
+            yblock = '\n'.join(y_parts)
+            body = (
+                f'{body}\n── yt-dlp ──\n{yblock}' if body else f'── yt-dlp ──\n{yblock}'
+            )
+        return body
+
     async def _send_progress_line(self, line: str) -> None:
         if self._media_payload.ack_message_id is None:
             return
@@ -103,18 +157,39 @@ class MediaService:
             line=line[:4000],
         )
         await publisher.send_download_progress(payload)
+        now = time.monotonic()
+        if now - self._last_db_progress_write >= self._DB_PROGRESS_MIN_INTERVAL:
+            self._last_db_progress_write = now
+            try:
+                await self._repository.update_task_progress_snapshot(self._task.id, line)
+            except Exception:
+                self._log.debug('progress_snapshot DB update failed', exc_info=True)
 
     async def _snapshot_progress_to_user(self) -> None:
         """Push full timeline + latest yt-dlp line to Telegram (HTML <pre> on bot side)."""
-        parts = self._progress_steps[-20:]
-        body = '\n'.join(parts)
-        if self._ytdlp_tail:
-            body = f'{body}\n── yt-dlp ──\n{self._ytdlp_tail}' if body else self._ytdlp_tail
-        await self._send_progress_line(body)
+        await self._send_progress_line(self._compose_progress_body())
 
     async def _phase(self, step: str) -> None:
-        self._progress_steps.append(step)
+        now = time.monotonic()
+        if self._current_phase_label is not None:
+            dur = now - self._phase_started
+            self._phase_labels.append(
+                f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
+            )
+        self._current_phase_label = step
+        self._phase_started = now
         self._log.info('Progress phase: %s', step)
+        await self._snapshot_progress_to_user()
+
+    async def _finalize_current_phase(self) -> None:
+        if self._current_phase_label is None:
+            return
+        now = time.monotonic()
+        dur = now - self._phase_started
+        self._phase_labels.append(
+            f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
+        )
+        self._current_phase_label = None
         await self._snapshot_progress_to_user()
 
     async def _start_download(self, host_conf: AbstractHostConfig) -> DownMedia:
@@ -126,7 +201,7 @@ class MediaService:
                 line = MediaService._format_ytdlp_progress_line(d)
                 if not line:
                     return
-                self._ytdlp_tail = line
+                self._bump_ytdlp_line(line)
                 now = time.monotonic()
                 if now - last_ts[0] < 0.9:
                     return
@@ -149,7 +224,7 @@ class MediaService:
                 return
 
         try:
-            return await loop.run_in_executor(
+            media = await loop.run_in_executor(
                 None,
                 lambda: self._downloader.download(
                     host_conf=host_conf,
@@ -163,6 +238,8 @@ class MediaService:
             )
             await self._handle_download_exception(err)
             raise DownloadVideoServiceError(message=str(err), task=self._task) from None
+        self._finalize_ytdlp_section()
+        return media
 
     async def _post_process_media(
         self, media: DownMedia, host_conf: AbstractHostConfig
@@ -181,6 +258,7 @@ class MediaService:
             case DownMediaType.AUDIO_VIDEO:
                 await asyncio.gather(*(post_process_audio(), post_process_video()))
 
+        await self._finalize_current_phase()
         await self._repository.save_as_done(self._task)
 
     async def _post_process_video(

@@ -1,4 +1,6 @@
 import asyncio
+import html
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Coroutine
 from itertools import chain
@@ -6,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ConfigDict, FilePath
 from pyrogram.enums import ChatAction, MessageMediaType, ParseMode
+from pyrogram.errors import MessageIdInvalid, MessageNotModified
 from pyrogram.types import Animation, Message
 from pyrogram.types import Audio as _Audio
 from pyrogram.types import Video as _Video
@@ -123,9 +126,87 @@ class AbstractUploadTask(AbstractTask, ABC):
                 forward_chat_ids.append(user.upload.forward_group_id)
         return forward_chat_ids
 
+    @staticmethod
+    def _human_speed(bps: float) -> str:
+        if bps >= 1048576:
+            return f'{bps / 1048576:.2f} MiB/s'
+        if bps >= 1024:
+            return f'{bps / 1024:.2f} KiB/s'
+        return f'{bps:.0f} B/s'
+
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0 or seconds > 86400 * 2 or seconds != seconds:  # NaN
+            return '—'
+        sec_i = int(seconds)
+        m, s = divmod(sec_i, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f'{h:d}:{m:02d}:{s:02d}'
+        return f'{m:d}:{s:02d}'
+
+    def _format_upload_progress_line(
+        self, current: int, total: int, *, chat_id: int, now: float
+    ) -> str:
+        if total <= 0:
+            pct_s = '—'
+        else:
+            pct_s = f'{100.0 * current / total:.1f}%'
+        parts = [pct_s, f'получатель {chat_id}']
+        if self._upload_ack_ref_mono > 0 and current > self._upload_ack_ref_bytes:
+            dt = now - self._upload_ack_ref_mono
+            db = current - self._upload_ack_ref_bytes
+            if dt >= 0.08 and db > 0:
+                bps = db / dt
+                parts.append(f'⚡ {self._human_speed(bps)}')
+                if total > current and bps > 0:
+                    eta = (total - current) / bps
+                    parts.append(f'ETA ~{self._format_eta(eta)}')
+        return ' · '.join(parts)
+
+    async def _report_upload_progress(self, current: int, total: int, chat_id: int) -> None:
+        chat_id_body = self._ctx.from_chat_id
+        ack_id = self._ctx.context.ack_message_id
+        if chat_id_body is None or ack_id is None:
+            return
+        now = time.monotonic()
+        done = total > 0 and current >= total
+        if not done and now - self._upload_ack_last_edit < 0.9:
+            return
+
+        line = self._format_upload_progress_line(current, total, chat_id=chat_id, now=now)
+        fname = html.escape(str(self._filename)[:200])
+        detail = f'<pre>{html.escape(line)}</pre>'
+        text = f'⬆️ <b>Загрузка в Telegram</b>\n<code>{fname}</code>\n{detail}'
+        try:
+            await self._bot.edit_message_text(
+                chat_id=chat_id_body,
+                message_id=ack_id,
+                text=text[:4090],
+                parse_mode=ParseMode.HTML,
+            )
+        except MessageNotModified:
+            pass
+        except MessageIdInvalid:
+            self._log.debug('Upload progress edit skipped (ack message gone)')
+        except Exception:
+            self._log.debug('Upload progress edit failed', exc_info=True)
+
+        self._upload_ack_last_edit = now
+        self._upload_ack_ref_bytes = current
+        self._upload_ack_ref_mono = now
+
+    def _make_upload_progress(self, chat_id: int):
+        async def progress(current: int, total: int) -> None:
+            await self._report_upload_progress(current, total, chat_id)
+
+        return progress
+
     @retry(wait=wait_fixed(3), stop=stop_after_attempt(3), reraise=True)
     async def __upload(self, chat_id: int) -> Message | None:
         self._log.debug('Uploading to "%d" with context: %s', chat_id, self._media_ctx)
+        self._upload_ack_ref_bytes = 0
+        self._upload_ack_ref_mono = time.monotonic()
         return await self._generate_send_media_coroutine(chat_id)
 
     @abstractmethod
@@ -198,6 +279,7 @@ class AudioUploadTask(AbstractUploadTask):
             'caption': self._media_ctx.caption,
             'file_name': self._media_ctx.filename,
             'duration': int(self._media_ctx.duration),
+            'progress': self._make_upload_progress(chat_id),
         }
         return self._bot.send_audio(**kwargs)
 
@@ -284,6 +366,7 @@ class VideoUploadTask(AbstractUploadTask):
 
         if self._media_ctx.thumb:
             kwargs['thumb'] = self._media_ctx.thumb
+        kwargs['progress'] = self._make_upload_progress(chat_id)
         if self._media_ctx.type is MessageMediaType.ANIMATION:
             kwargs['animation'] = self._media_ctx.filepath
             return self._bot.send_animation(**kwargs)

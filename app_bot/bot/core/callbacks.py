@@ -1,11 +1,14 @@
+import asyncio
 import logging
 
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified
 from pyrogram.types import Message
 from yt_shared.emoji import SUCCESS_EMOJI
+from yt_shared.utils.tasks.tasks import create_task as bg_create_task
 
 from bot.bot.client import VideoBotClient
-from bot.core.queue_status import download_workflow_backlog_count
+from bot.core.queue_status import build_queue_dashboard, download_workflow_backlog_count
 from bot.core.service import UrlParser, UrlService
 from bot.core.utils import bold, get_user_id
 
@@ -29,18 +32,74 @@ class TelegramCallback:
             reply_to_message_id=message.id,
         )
 
-    @staticmethod
-    async def on_queue(client: VideoBotClient, message: Message) -> None:  # noqa: ARG004
-        n = await download_workflow_backlog_count()
-        await message.reply(
-            (
-                '📥 <b>Очередь загрузок</b>\n'
-                f'Активных задач (в RabbitMQ + в работе у воркера): <code>{n}</code>\n\n'
-                '<i>Прогресс по вашей ссылке обновляется под ответом «URL sent…».</i>'
-            ),
+    async def on_queue(self, client: VideoBotClient, message: Message) -> None:
+        viewer_id = get_user_id(message)
+        is_admin = viewer_id in client.admin_users
+        dash = await build_queue_dashboard(viewer_user_id=viewer_id, is_admin=is_admin)
+        reply = await message.reply(
+            dash.html,
             parse_mode=ParseMode.HTML,
             reply_to_message_id=message.id,
         )
+        bg_create_task(
+            self._poll_queue_dashboard(
+                client=client,
+                chat_id=message.chat.id,
+                message_id=reply.id,
+                viewer_user_id=viewer_id,
+                is_admin=is_admin,
+            ),
+            task_name='queue_dashboard_refresh',
+            logger=self._log,
+            exception_message='Task "%s" raised an exception',
+            exception_message_args=('queue_dashboard_refresh',),
+        )
+
+    async def _poll_queue_dashboard(
+        self,
+        client: VideoBotClient,
+        *,
+        chat_id: int,
+        message_id: int,
+        viewer_user_id: int,
+        is_admin: bool,
+    ) -> None:
+        """Periodically refresh the /queue message until globally idle or cap."""
+        empty_runs = 0
+        for _ in range(48):
+            await asyncio.sleep(2.5)
+            try:
+                dash = await build_queue_dashboard(
+                    viewer_user_id=viewer_user_id, is_admin=is_admin
+                )
+                await client.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=dash.html,
+                    parse_mode=ParseMode.HTML,
+                )
+                if dash.backlog_total == 0 and dash.listed_tasks == 0:
+                    empty_runs += 1
+                else:
+                    empty_runs = 0
+                if empty_runs >= 2:
+                    break
+            except MessageNotModified:
+                dash = await build_queue_dashboard(
+                    viewer_user_id=viewer_user_id, is_admin=is_admin
+                )
+                if dash.backlog_total == 0 and dash.listed_tasks == 0:
+                    empty_runs += 1
+                else:
+                    empty_runs = 0
+                if empty_runs >= 2:
+                    break
+            except MessageIdInvalid:
+                break
+            except FloodWait as e:
+                await asyncio.sleep(float(e.value) + 0.5)
+            except Exception:
+                self._log.debug('queue poll edit failed', exc_info=True)
 
     async def on_message(self, client: VideoBotClient, message: Message) -> None:
         """Receive video URL and send to the download worker."""

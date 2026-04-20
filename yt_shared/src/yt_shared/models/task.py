@@ -29,6 +29,8 @@ class Task(Base, Timestamp):
     from_user_id = sa.Column(sa.BigInteger, nullable=True)
     message_id = sa.Column(sa.BigInteger, nullable=True)
     error = sa.Column(sa.String, nullable=True)
+    progress_snapshot = sa.Column(sa.Text, nullable=True)
+    progress_updated_at = sa.Column(sa.DateTime, nullable=True)
     yt_dlp_version = sa.Column(
         sa.String, nullable=True, default=select(YTDLP.current_version)
     )
