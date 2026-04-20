@@ -18,7 +18,7 @@ chmod +x scripts/build-low-resource.sh
 docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 ```
 
-При необходимости ещё сильнее ограничить параллелизм BuildKit: `export BUILDKIT_MAX_PARALLELISM=1` (уже по умолчанию в скрипте).
+При необходимости ещё сильнее ограничить параллелизм BuildKit: `export BUILDKIT_MAX_PARALLELISM=1` (уже по умолчанию в скрипте). В Docker Compose v5 у `docker compose build` нет флага `--parallel`; не используйте его (иначе `1` может воспринять как имя сервиса).
 
 ## Приоритет сети и других стеков
 
