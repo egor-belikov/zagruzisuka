@@ -4,7 +4,6 @@ import traceback
 from typing import Any, ClassVar
 
 from pyrogram.enums import ParseMode
-from pyrogram.errors import MessageIdInvalid, MessageNotModified
 from yt_shared.emoji import SUCCESS_EMOJI
 from yt_shared.enums import MediaFileType, TaskSource
 from yt_shared.rabbit.publisher import RmqPublisher
@@ -54,31 +53,6 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
                 message_ids=self._body.context.ack_message_id,
             )
 
-    async def _set_upload_message(self, media_object: BaseMedia) -> None:
-        if not (self._body.from_chat_id and self._body.context.ack_message_id):
-            return
-
-        try:
-            fname = html.escape(str(media_object.current_filename)[:200])
-            await self._bot.edit_message_text(
-                chat_id=self._body.from_chat_id,
-                message_id=self._body.context.ack_message_id,
-                text=(
-                    f'✅ <b>Скачано.</b> Обработка на сервере и загрузка в Telegram '
-                    f'— прогресс загрузки в <b>отдельном сообщении</b> ниже.\n'
-                    f'<code>{fname}</code>'
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-        except (MessageIdInvalid, MessageNotModified) as err:
-            # Expected behaviour when several links where pasted in one message and
-            # the acknowledgment message was deleted after the first successful upload
-            self._log.warning(
-                'Could not edit the message id "%s": %s',
-                self._body.context.ack_message_id,
-                err,
-            )
-
     async def _publish_error_message(self, err: Exception) -> None:
         err_payload = ErrorDownloadGeneralPayload(
             task_id=self._body.task_id,
@@ -100,7 +74,6 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             await self._send_success_text(media_object)
             if self._upload_is_enabled():
                 self._validate_file_size_for_upload(media_object)
-                await self._set_upload_message(media_object)
                 await self._create_upload_task(media_object)
             else:
                 self._log.warning(
@@ -140,15 +113,21 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             exception_message_args=(task_name,),
         )
 
-    @staticmethod
-    def _create_success_text(media_object: BaseMedia) -> str:
+    def _create_success_text(self, media_object: BaseMedia) -> str:
         text = f'{SUCCESS_EMOJI} {bold("Downloaded")} {media_object.current_filename}'
         if media_object.saved_to_storage:
             text = f'{text}\n💾 {bold("Saved to media storage")}'
-        return f'{text}\n📏 {bold("Size")} {media_object.file_size_human()}'
+        text = f'{text}\n📏 {bold("Size")} {media_object.file_size_human()}'
+        log = (self._body.progress_log or '').strip()
+        if log:
+            safe = html.escape(log[:3400])
+            text = f'{text}\n\n<b>Лог скачивания и обработки</b>\n<pre>{safe}</pre>'
+        return text
 
     async def _send_success_text(self, media_object: BaseMedia) -> None:
         text = self._create_success_text(media_object)
+        if len(text) > 4090:
+            text = text[:4085] + '…'
         for user in self._receiving_users:
             if not is_user_upload_silent(user=user, conf=self._bot.conf):
                 kwargs: dict[str, Any] = {

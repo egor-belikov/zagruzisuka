@@ -47,7 +47,7 @@ class InboundPayloadHandler:
                 task_repository=TaskRepository(db=session),
             )
             try:
-                media, task = await media_service.process()
+                media, task, progress_log = await media_service.process()
             except DownloadVideoServiceError as err:
                 await self._send_failed_video_download_task(err, media_payload)
                 return
@@ -59,10 +59,14 @@ class InboundPayloadHandler:
                 )
                 self._log.error(err_msg)
                 raise RuntimeError(err_msg)
-            await self._send_finished_task(task, media, media_payload)
+            await self._send_finished_task(task, media, media_payload, progress_log)
 
     async def _send_finished_task(
-        self, task: Task, media: DownMedia, media_payload: InbMediaPayload
+        self,
+        task: Task,
+        media: DownMedia,
+        media_payload: InbMediaPayload,
+        progress_log: str,
     ) -> None:
         """Send a finished task message.
 
@@ -81,6 +85,7 @@ class InboundPayloadHandler:
             from_user_id=task.from_user_id,
             context=media_payload,
             yt_dlp_version=ytdlp_version.__version__,
+            progress_log=progress_log[:8000],
         )
         await self._rmq_publisher.send_download_finished(success_payload)
 

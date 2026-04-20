@@ -44,17 +44,20 @@ class MediaService:
         self._task: Task | None = None
         self._phase_labels: list[str] = []
         self._current_phase_label: str | None = None
+        self._phase_started: float = 0.0
         self._ytdlp_tail: str = ''
         self._ytdlp_session_summary: str | None = None
         self._download_t0: float | None = None
         self._last_db_progress_write: float = 0.0
         self._publish_user_progress: bool = True
+        self._final_progress_transcript: str = ''
 
-    async def process(self) -> tuple[DownMedia | None, Task | None]:
+    async def process(self) -> tuple[DownMedia | None, Task | None, str]:
         self._task = await self._repository.get_or_create_task(self._media_payload)
         if self._task.status != TaskStatus.PENDING.value:
-            return None, None
-        return (await self._process(), self._task)
+            return None, None, ''
+        media = await self._process()
+        return media, self._task, self._final_progress_transcript
 
     async def _process(self) -> DownMedia:
         host_conf = self._get_host_conf()
@@ -62,7 +65,6 @@ class MediaService:
         await self._phase('⏳ Подключение к источнику, подготовка к скачиванию…')
         media = await self._start_download(host_conf=host_conf)
         await self._phase('✅ Файл от yt-dlp получен, дальше обработка на сервере…')
-        self._publish_user_progress = False
         try:
             await self._post_process_media(media=media, host_conf=host_conf)
         except Exception:
@@ -76,6 +78,11 @@ class MediaService:
         host_to_cls_map = HostConfRegistry.get_host_to_cls_map()
         host_cls = host_to_cls_map.get(urlsplit(url).netloc, host_to_cls_map[None])
         return host_cls(url=url)
+
+    @staticmethod
+    def _format_phase_duration(seconds: float) -> str:
+        rounded = round(seconds * 5) / 5
+        return f'{rounded:.1f} с'
 
     @staticmethod
     def _format_session_duration(seconds: float) -> str:
@@ -198,18 +205,27 @@ class MediaService:
         await self._send_progress_line(self._compose_progress_body())
 
     async def _phase(self, step: str) -> None:
+        now = time.monotonic()
         if self._current_phase_label is not None:
-            self._phase_labels.append(self._current_phase_label)
+            dur = now - self._phase_started
+            self._phase_labels.append(
+                f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
+            )
             if 'Файл от yt-dlp получен' in self._current_phase_label:
                 self._ytdlp_session_summary = None
         self._current_phase_label = step
+        self._phase_started = now
         self._log.info('Progress phase: %s', step)
         await self._snapshot_progress_to_user()
 
     async def _finalize_current_phase(self) -> None:
         if self._current_phase_label is None:
             return
-        self._phase_labels.append(self._current_phase_label)
+        now = time.monotonic()
+        dur = now - self._phase_started
+        self._phase_labels.append(
+            f'{self._current_phase_label} ({self._format_phase_duration(dur)})'
+        )
         self._current_phase_label = None
         await self._snapshot_progress_to_user()
 
@@ -281,7 +297,9 @@ class MediaService:
                 await asyncio.gather(*(post_process_audio(), post_process_video()))
 
         await self._finalize_current_phase()
+        self._final_progress_transcript = self._compose_progress_body()
         await self._repository.save_as_done(self._task)
+        self._publish_user_progress = False
 
     async def _post_process_video(
         self, media: DownMedia, host_conf: AbstractHostConfig

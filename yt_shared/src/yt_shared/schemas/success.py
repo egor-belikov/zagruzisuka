@@ -15,3 +15,4 @@ class SuccessDownloadPayload(BaseRabbitDownloadPayload):
     task_id: uuid.UUID
     media: DownMedia
     yt_dlp_version: StrictStr | None
+    progress_log: str = ''
