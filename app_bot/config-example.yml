@@ -11,7 +11,7 @@ telegram:
       is_admin: !!bool True
       send_startup_message: !!bool True
       download_media_type: "VIDEO"
-      save_to_storage: !!bool False
+      save_to_storage: !!bool False  # в коде бота игнорируется — на сервер не сохраняем
       use_url_regex_match: !!bool True
       upload:
         upload_video_file: !!bool False

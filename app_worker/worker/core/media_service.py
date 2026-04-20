@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import shutil
 import time
 from collections.abc import Coroutine
 from pathlib import Path
@@ -11,13 +10,12 @@ from yt_shared.enums import DownMediaType, TaskStatus
 from yt_shared.models import Task
 from yt_shared.rabbit.publisher import RmqPublisher
 from yt_shared.repositories.task import TaskRepository
-from yt_shared.schemas.media import BaseMedia, DownMedia, InbMediaPayload, Video
+from yt_shared.schemas.media import DownMedia, InbMediaPayload, Video
 from yt_shared.schemas.progress import DownloadProgressPayload
 from yt_shared.utils.common import gen_random_str
 from yt_shared.utils.file import remove_dir
 from yt_shared.utils.tasks.tasks import create_task
 
-from worker.core.config import settings
 from worker.core.downloader import MediaDownloader
 from worker.core.exceptions import DownloadVideoServiceError
 from worker.core.tasks.encode import EncodeToH264Task
@@ -390,7 +388,7 @@ class MediaService:
     async def _post_process_video(
         self, media: DownMedia, host_conf: AbstractHostConfig
     ) -> None:
-        """Post-process downloaded media files, e.g. make thumbnail and copy to storage."""
+        """Post-process downloaded media files, e.g. make thumbnail."""
         video = media.video
         await self._phase('📋 Проверка метаданных (длительность, разрешение)…')
         # yt-dlp's 'info-meta' may not contain all needed video metadata.
@@ -416,10 +414,6 @@ class MediaService:
                 video_ctx=video,
             ).run()
 
-        if self._media_payload.save_to_storage:
-            await self._phase('📁 Копирование в постоянное хранилище…')
-            await self._copy_file_to_storage(video)
-
         if host_conf.ENCODE_VIDEO:
             await self._phase('🎞 Конвертация в H.264 для Telegram (короткий проход)…')
             await EncodeToH264Task(
@@ -437,11 +431,7 @@ class MediaService:
         media: DownMedia,
         host_conf: AbstractHostConfig,  # noqa: ARG002
     ) -> None:
-        coro_tasks = [self._repository.save_file(self._task, media.audio, media.meta)]
-        if self._media_payload.save_to_storage:
-            coro_tasks.append(self._create_copy_file_task(media.audio))
-        results = await asyncio.gather(*coro_tasks)
-        file = results[0]
+        file = await self._repository.save_file(self._task, media.audio, media.meta)
         media.audio.orm_file_id = file.id
 
     async def _set_probe_ctx(self, video: Video) -> None:
@@ -462,16 +452,6 @@ class MediaService:
         video.width = video_streams[0]['width']
         video.height = video_streams[0]['height']
 
-    def _create_copy_file_task(self, file: BaseMedia) -> asyncio.Task:
-        task_name = f'Copy {file.file_type} file to storage task'
-        return create_task(
-            self._copy_file_to_storage(file),
-            task_name=task_name,
-            logger=self._log,
-            exception_message='Task "%s" raised an exception',
-            exception_message_args=(task_name,),
-        )
-
     def _create_thumb_task(
         self, file_path: Path, thumb_path: Path, duration: float, video_ctx: Video
     ) -> asyncio.Task:
@@ -484,20 +464,6 @@ class MediaService:
             exception_message='Task "%s" raised an exception',
             exception_message_args=(MakeThumbnailTask.__class__.__name__,),
         )
-
-    async def _copy_file_to_storage(self, file: BaseMedia) -> None:
-        dst = settings.STORAGE_PATH / file.current_filename
-        if dst.is_file():
-            self._log.warning('Destination file in storage already exists: %s', dst)
-            dst = (
-                dst.parent
-                / f'{dst.stem}-{int(time.time())}-{gen_random_str()}{dst.suffix}'
-            )
-            self._log.warning('Adding current timestamp to filename: %s', dst)
-
-        self._log.info('Copying "%s" to storage "%s"', file.current_filepath, dst)
-        await asyncio.to_thread(shutil.copy2, file.current_filepath, dst)
-        file.mark_as_saved_to_storage(storage_path=dst)
 
     def _err_file_cleanup(self, video: DownMedia) -> None:
         """Cleanup any downloaded/created data if post-processing failed."""

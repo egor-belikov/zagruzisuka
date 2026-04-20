@@ -34,4 +34,4 @@ docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 
 ## Удаление после отправки в Telegram
 
-После успешной (или неуспешной) обработки сценария бот в `SuccessDownloadHandler._cleanup()` вызывает `remove_dir(self._body.media.root_path)` — каталог задачи с исходным видео и временными файлами **удаляется** в `finally` после `await` загрузки в Telegram (`upload_task` дожидается завершения). Отдельно **остаются** только копии в `STORAGE_PATH` (`/filestorage`), если у пользователя включено `save_to_storage` — это отдельное постоянное хранилище по настройке.
+После успешной (или неуспешной) обработки сценария бот в `SuccessDownloadHandler._cleanup()` вызывает `remove_dir(self._body.media.root_path)` — каталог задачи с исходным видео и временными файлами **удаляется** в `finally` после `await` загрузки в Telegram (`upload_task` дожидается завершения). **Постоянных копий медиа на диске сервера нет**: воркер не копирует файлы в `STORAGE_PATH`; из бота в очередь всегда уходит `save_to_storage=False`.

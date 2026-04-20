@@ -42,17 +42,9 @@ Version: 1.7.2. [Release details](RELEASES.md).
    in `app_bot/config.yml`'s variable `download_media_type`. Default `VIDEO`
 8. If you want your downloaded audio/video to be uploaded back to the Telegram, set `upload_video_file` config variable 
    for your user/group in the `app_bot/config.yml` to `True`
-9. Media `STORAGE_PATH` environment variable is located in
-   the `envs/worker.env` file. By default, it's `/filestorage` path inside the
-   container. What you want is to map the real path to this inside
-   the `docker-compose.yml` file for `worker` service, e.g. if you're on Windows, next
-   strings mean container path `/filestorage` is mapped to real `D:/Videos` so your
-   videos will be saved to your `Videos` folder.
-   ```yml
-     worker:
-       volumes:
-         - "D:/Videos:/filestorage"
-   ```
+9. Downloaded media are **not** kept on the server after processing (no copy to a
+   permanent folder); only DB metadata remains. The `STORAGE_PATH` entry in
+   `envs/worker.env` is kept for compatibility with worker settings validation.
 10. Change application's `LOG_LEVEL` in `envs/common.env` to `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` if needed
 
 ## 🏃 Run

@@ -34,7 +34,7 @@ class UrlService:
             from_chat_id=url.from_chat_id,
             from_chat_type=url.from_chat_type,
             source=TaskSource.BOT,
-            save_to_storage=url.save_to_storage,
+            save_to_storage=False,
             download_media_type=url.download_media_type,
             custom_filename=None,
             automatic_extension=False,
@@ -75,7 +75,7 @@ class UrlParser:
                 from_user_id=from_user_id,
                 message_id=message.id,
                 ack_message_id=ack_message.id,
-                save_to_storage=user.save_to_storage,
+                save_to_storage=False,
                 download_media_type=user.download_media_type,
             )
             for orig_url, url in self._preprocess_urls(urls).items()
