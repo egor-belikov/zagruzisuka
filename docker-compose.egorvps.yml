@@ -8,6 +8,8 @@
 #
 # cpu_shares: ниже 1024 — при нехватке CPU планировщик отдаёт ядра другим контейнерам/стекам.
 # При необходимости снизить приоритет I/O воркера на хосте: systemd slice или cgroup v2 io.weight.
+#
+# Лимит cpus у контейнера не может превышать число ядер хоста (на VPS с 1 vCPU — макс. 1.0 на сервис).
 
 services:
   yt_api:
@@ -25,7 +27,7 @@ services:
     pids_limit: 256
 
   yt_worker:
-    cpus: "2.5"
+    cpus: "0.95"
     mem_limit: 4g
     mem_reservation: 512m
     cpu_shares: 128
