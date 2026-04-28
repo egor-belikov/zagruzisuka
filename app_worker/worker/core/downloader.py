@@ -99,31 +99,29 @@ def _resolve_streamff_direct_url(url: str) -> str:
 def _build_reddit_fallback_urls(url: str) -> list[str]:
     parsed = urlsplit(url)
     if parsed.netloc.lower() not in _REDDIT_SHORT_HOSTS:
-        return [url]
+        return []
     match = _REDDIT_VIDEO_ID_RE.match(parsed.path or '')
     if match is None:
-        return [url]
+        return []
     video_id = match.group('video_id')
     return [
         f'https://v.redd.it/{video_id}/HLSPlaylist.m3u8',
         f'https://v.redd.it/{video_id}/DASHPlaylist.mpd',
-        url,
     ]
 
 
 def _build_streamain_fallback_urls(url: str) -> list[str]:
     parsed = urlsplit(url)
     if parsed.netloc.lower() not in _STREAMAIN_HOSTS:
-        return [url]
+        return []
     match = _STREAMAIN_PATH_RE.match(parsed.path or '')
     if match is None:
-        return [url]
+        return []
     share_id = match.group('share_id')
     fallback_urls = [_STREAMAIN_WATCH_TPL.format(share_id=share_id)]
     fallback_urls.extend(
         tpl.format(share_id=share_id) for tpl in _STREAMAIN_FALLBACK_CANDIDATE_TPLS
     )
-    fallback_urls.append(url)
     return fallback_urls
 
 
@@ -140,9 +138,12 @@ def _dedupe_keep_order(urls: list[str]) -> list[str]:
 
 def _build_fallback_urls(url: str) -> list[str]:
     resolved_streamff = _resolve_streamff_direct_url(url)
-    all_candidates = [resolved_streamff]
+    all_candidates: list[str] = []
+    if resolved_streamff != url:
+        all_candidates.append(resolved_streamff)
     all_candidates.extend(_build_reddit_fallback_urls(url))
     all_candidates.extend(_build_streamain_fallback_urls(url))
+    all_candidates.append(url)
     return _dedupe_keep_order(all_candidates)
 
 
