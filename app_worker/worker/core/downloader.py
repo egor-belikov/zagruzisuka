@@ -34,6 +34,19 @@ _STREAMFF_HOSTS = {
 }
 _STREAMFF_PATH_RE = re.compile(r'^/v/(?P<share_id>[A-Za-z0-9_-]+)(?:/)?$')
 _STREAMFF_CDN_MEDIA_TPL = 'https://cdn.streamff.one/{share_id}.mp4'
+_REDDIT_SHORT_HOSTS = {'v.redd.it', 'www.v.redd.it'}
+_REDDIT_VIDEO_ID_RE = re.compile(r'^/(?P<video_id>[A-Za-z0-9]+)(?:/)?$')
+_STREAMAIN_HOSTS = {'streamain.com', 'www.streamain.com'}
+_STREAMAIN_PATH_RE = re.compile(
+    r'^/(?:[a-z]{2}(?:-[A-Z]{2})?/)?(?P<share_id>[A-Za-z0-9_-]+)/watch(?:/)?$'
+)
+_STREAMAIN_WATCH_TPL = 'https://streamain.com/en/{share_id}/watch'
+_STREAMAIN_FALLBACK_CANDIDATE_TPLS = (
+    'https://cdn.streamain.com/guests/{share_id}.mp4',
+    'https://cdn.streamain.com/guests/{share_id}.m3u8',
+    'https://cdn.streamain.com/guests/{share_id}/playlist.m3u8',
+    'https://cdn.streamain.com/{share_id}.mp4',
+)
 
 
 def _first_env_proxy() -> str | None:
@@ -83,6 +96,56 @@ def _resolve_streamff_direct_url(url: str) -> str:
     return _STREAMFF_CDN_MEDIA_TPL.format(share_id=match.group('share_id'))
 
 
+def _build_reddit_fallback_urls(url: str) -> list[str]:
+    parsed = urlsplit(url)
+    if parsed.netloc.lower() not in _REDDIT_SHORT_HOSTS:
+        return [url]
+    match = _REDDIT_VIDEO_ID_RE.match(parsed.path or '')
+    if match is None:
+        return [url]
+    video_id = match.group('video_id')
+    return [
+        f'https://v.redd.it/{video_id}/HLSPlaylist.m3u8',
+        f'https://v.redd.it/{video_id}/DASHPlaylist.mpd',
+        url,
+    ]
+
+
+def _build_streamain_fallback_urls(url: str) -> list[str]:
+    parsed = urlsplit(url)
+    if parsed.netloc.lower() not in _STREAMAIN_HOSTS:
+        return [url]
+    match = _STREAMAIN_PATH_RE.match(parsed.path or '')
+    if match is None:
+        return [url]
+    share_id = match.group('share_id')
+    fallback_urls = [_STREAMAIN_WATCH_TPL.format(share_id=share_id)]
+    fallback_urls.extend(
+        tpl.format(share_id=share_id) for tpl in _STREAMAIN_FALLBACK_CANDIDATE_TPLS
+    )
+    fallback_urls.append(url)
+    return fallback_urls
+
+
+def _dedupe_keep_order(urls: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in urls:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _build_fallback_urls(url: str) -> list[str]:
+    resolved_streamff = _resolve_streamff_direct_url(url)
+    all_candidates = [resolved_streamff]
+    all_candidates.extend(_build_reddit_fallback_urls(url))
+    all_candidates.extend(_build_streamain_fallback_urls(url))
+    return _dedupe_keep_order(all_candidates)
+
+
 class MediaDownloader:
     _PLAYLIST_TYPE = 'playlist'
     _DESTINATION_TMP_DIR_NAME_LEN = 4
@@ -121,15 +184,21 @@ class MediaDownloader:
         media_payload: InbMediaPayload,
         progress_hook: Callable[[dict], None] | None = None,
     ) -> DownMedia:
+        def cleanup_tmp_dir() -> None:
+            for child in curr_tmp_dir.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+
         media_type = media_payload.download_media_type
         url = host_conf.url
-        resolved_url = url
+        fallback_urls = [url]
         try:
-            resolved_url = _resolve_streamff_direct_url(url)
+            fallback_urls = _build_fallback_urls(url)
         except Exception:
-            self._log.warning('Failed to resolve streamff direct URL for %s', url)
-        if resolved_url != url:
-            self._log.info('Resolved %s to direct URL %s', url, resolved_url)
+            self._log.warning('Failed to build fallback URLs for %s', url, exc_info=True)
+        self._log.info('Download URL candidates for %s: %s', url, fallback_urls)
         self._log.info('Downloading %s, media_type %s', url, media_type)
         tmp_down_path = settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOAD_DIR
         with TemporaryDirectory(prefix='tmp_media_dir-', dir=tmp_down_path) as tmp_dir:
@@ -146,22 +215,43 @@ class MediaDownloader:
             opts['progress_hooks'] = hooks
 
             with yt_dlp.YoutubeDL(opts) as ytdl:
-                self._log.info('Downloading "%s" to "%s"', resolved_url, curr_tmp_dir)
                 self._log.info('Downloading with options: %s', opts)
-
-                try:
-                    meta: dict | None = ytdl.extract_info(resolved_url, download=True)
-                except DownloadError as err:
-                    self._log.error(
-                        'yt-dlp DownloadError for %s (resolved=%s): %s',
+                meta: dict | None = None
+                last_error: DownloadError | None = None
+                for candidate_url in fallback_urls:
+                    self._log.info('Downloading "%s" to "%s"', candidate_url, curr_tmp_dir)
+                    try:
+                        meta = ytdl.extract_info(candidate_url, download=True)
+                    except DownloadError as err:
+                        last_error = err
+                        self._log.error(
+                            'yt-dlp DownloadError for %s (candidate=%s): %s',
+                            url,
+                            candidate_url,
+                            err,
+                        )
+                        cleanup_tmp_dir()
+                        continue
+                    if meta:
+                        break
+                    self._log.warning(
+                        'yt-dlp returned empty meta for %s (candidate=%s), trying next',
                         url,
-                        resolved_url,
-                        err,
+                        candidate_url,
                     )
-                    raise MediaDownloaderError(str(err)) from err
+                    cleanup_tmp_dir()
+
+                if meta is None and last_error:
+                    raise MediaDownloaderError(str(last_error)) from last_error
                 if not meta:
                     err_msg = 'Error during media download. Check logs.'
-                    self._log.error('%s. Meta: %s', err_msg, meta)
+                    self._log.error(
+                        '%s. Meta: %s. Url: %s. Candidates: %s',
+                        err_msg,
+                        meta,
+                        url,
+                        fallback_urls,
+                    )
                     raise MediaDownloaderError(err_msg)
 
                 current_files = list(curr_tmp_dir.iterdir())
