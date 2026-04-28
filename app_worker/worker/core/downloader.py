@@ -1,11 +1,13 @@
 import glob
 import logging
 import os
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
@@ -24,6 +26,14 @@ except ImportError:
     from ytdl_opts.default import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
 
 _DEFAULT_MAX_FILESIZE = 10 * 1024 * 1024 * 1024
+_STREAMFF_HOSTS = {
+    'streamff.com',
+    'www.streamff.com',
+    'streamff.link',
+    'www.streamff.link',
+}
+_STREAMFF_PATH_RE = re.compile(r'^/v/(?P<share_id>[A-Za-z0-9_-]+)(?:/)?$')
+_STREAMFF_CDN_MEDIA_TPL = 'https://cdn.streamff.one/{share_id}.mp4'
 
 
 def _first_env_proxy() -> str | None:
@@ -59,6 +69,18 @@ def _merge_global_ytdl_opts(opts: dict) -> dict:
         else:
             out['max_filesize'] = _DEFAULT_MAX_FILESIZE
     return out
+
+
+def _resolve_streamff_direct_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.netloc.lower() not in _STREAMFF_HOSTS:
+        return url
+
+    match = _STREAMFF_PATH_RE.match(parsed.path or '')
+    if match is None:
+        return url
+
+    return _STREAMFF_CDN_MEDIA_TPL.format(share_id=match.group('share_id'))
 
 
 class MediaDownloader:
@@ -101,6 +123,13 @@ class MediaDownloader:
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
+        resolved_url = url
+        try:
+            resolved_url = _resolve_streamff_direct_url(url)
+        except Exception:
+            self._log.warning('Failed to resolve streamff direct URL for %s', url)
+        if resolved_url != url:
+            self._log.info('Resolved %s to direct URL %s', url, resolved_url)
         self._log.info('Downloading %s, media_type %s', url, media_type)
         tmp_down_path = settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOAD_DIR
         with TemporaryDirectory(prefix='tmp_media_dir-', dir=tmp_down_path) as tmp_dir:
@@ -117,13 +146,18 @@ class MediaDownloader:
             opts['progress_hooks'] = hooks
 
             with yt_dlp.YoutubeDL(opts) as ytdl:
-                self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)
+                self._log.info('Downloading "%s" to "%s"', resolved_url, curr_tmp_dir)
                 self._log.info('Downloading with options: %s', opts)
 
                 try:
-                    meta: dict | None = ytdl.extract_info(url, download=True)
+                    meta: dict | None = ytdl.extract_info(resolved_url, download=True)
                 except DownloadError as err:
-                    self._log.error('yt-dlp DownloadError for %s: %s', url, err)
+                    self._log.error(
+                        'yt-dlp DownloadError for %s (resolved=%s): %s',
+                        url,
+                        resolved_url,
+                        err,
+                    )
                     raise MediaDownloaderError(str(err)) from err
                 if not meta:
                     err_msg = 'Error during media download. Check logs.'
