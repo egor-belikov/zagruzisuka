@@ -25,7 +25,7 @@ try:
 except ImportError:
     from ytdl_opts.default import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
 
-_DEFAULT_MAX_FILESIZE = 10 * 1024 * 1024 * 1024
+_DEFAULT_MAX_FILESIZE = 1024 * 1024 * 1024  # 1 GiB; env YTDLP_MAX_FILESIZE_BYTES или 0 = без лимита
 _DEFAULT_SOCKET_TIMEOUT = 120
 _DEFAULT_RETRIES = 15
 _DEFAULT_FRAGMENT_RETRIES = 50
@@ -53,6 +53,30 @@ def _first_env_proxy() -> str | None:
         if raw:
             return raw
     return None
+
+
+def _long_video_threshold_seconds() -> float | None:
+    """Порог длительности (сек): дольше — качаем в низком качестве. Отключить: 0/off/never."""
+    raw = (os.environ.get('YTDLP_LONG_VIDEO_SECONDS') or '').strip().lower()
+    if raw in ('0', 'off', 'never', 'false', '-1'):
+        return None
+    if not raw:
+        return 600.0
+    try:
+        t = float(raw)
+    except ValueError:
+        return 600.0
+    return t if t > 0 else None
+
+
+def _long_video_format_string() -> str:
+    custom = (os.environ.get('YTDLP_LONG_VIDEO_FORMAT') or '').strip()
+    if custom:
+        return custom
+    return (
+        'bestvideo*[height<=360][fps<=30]+bestaudio/bestaudio+bestvideo*[height<=360]/'
+        'best[height<=360]/worst'
+    )
 
 
 def _env_positive_int(key: str, default: int) -> int:
@@ -133,6 +157,58 @@ class MediaDownloader:
             settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOADED_DIR
         )
 
+    def _probe_video_duration(self, opts: dict, resolved_url: str) -> float | None:
+        skip = frozenset({
+            'progress_hooks',
+            'postprocessors',
+            'forceprint',
+            'print_to_file',
+            'writesubtitles',
+            'writeautomaticsub',
+        })
+        probe_opts = {k: v for k, v in opts.items() if k not in skip}
+        probe_opts['quiet'] = True
+        probe_opts['no_warnings'] = True
+        try:
+            with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                info = ydl.extract_info(resolved_url, download=False)
+        except Exception as err:
+            self._log.warning('Duration probe failed for %s: %s', resolved_url, err)
+            return None
+        if not info:
+            return None
+        if info.get('_type') == 'playlist':
+            entries = info.get('entries') or []
+            if not entries:
+                return None
+            first = entries[0]
+            if first is None:
+                return None
+            info = first if isinstance(first, dict) else {}
+        duration = info.get('duration')
+        if duration is None:
+            return None
+        try:
+            return float(duration)
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_apply_long_video_low_format(self, opts: dict, resolved_url: str) -> None:
+        threshold = _long_video_threshold_seconds()
+        if threshold is None:
+            return
+        duration = self._probe_video_duration(opts, resolved_url)
+        if duration is None or duration < threshold:
+            return
+        fmt = _long_video_format_string()
+        opts['format'] = fmt
+        self._log.info(
+            'Long video (%.0fs >= %.0fs): using low format: %s',
+            duration,
+            threshold,
+            fmt,
+        )
+
     def download(
         self,
         host_conf: AbstractHostConfig,
@@ -178,6 +254,9 @@ class MediaDownloader:
             if progress_hook:
                 hooks.append(progress_hook)
             opts['progress_hooks'] = hooks
+
+            if media_type in (DownMediaType.VIDEO, DownMediaType.AUDIO_VIDEO):
+                self._maybe_apply_long_video_low_format(opts, resolved_url)
 
             with yt_dlp.YoutubeDL(opts) as ytdl:
                 self._log.info('Downloading "%s" to "%s"', resolved_url, curr_tmp_dir)

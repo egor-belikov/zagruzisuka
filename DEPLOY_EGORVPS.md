@@ -15,12 +15,15 @@ chmod +x scripts/migrate_testvps_to_egorvps_from_laptop.sh
 ## Лимиты в проекте
 
 - Раньше в compose стояло **~27 GiB tmpfs** — это был **потолок RAM-диска для временных файлов** во время скачивания/обработки, а не «вес проекта» и не склад готовых роликов на диске.
-- **tmpfs** для временных файлов yt-dlp: **10 GiB** (`docker-compose.yml`, `shared-tmpfs`).
-- **Один файл** с yt-dlp: до **~9 GiB** (`envs/worker.egorvps.env`, `YTDLP_MAX_FILESIZE_BYTES`).
+- **tmpfs** для временных файлов yt-dlp: **~2 GiB** (`docker-compose.yml`, `shared-tmpfs`), в связке с лимитом размера файла.
+- **Один файл** с yt-dlp: до **~1 GiB** по умолчанию (`worker`/`_merge_global_ytdl_opts`, `YTDLP_MAX_FILESIZE_BYTES` в `envs/worker.egorvps.env`). Снять лимит: `YTDLP_MAX_FILESIZE_BYTES=0`.
+- **Длинные видео** (по умолчанию **≥ 600 с**): более низкое разрешение (~360p) — `YTDLP_LONG_VIDEO_SECONDS`, `YTDLP_LONG_VIDEO_FORMAT`; отключить: `YTDLP_LONG_VIDEO_SECONDS=0`.
 - **Постоянные загрузки** (`/filestorage`): именованный том `zagruzisuka_filestorage` в `docker-compose.egorvps.yml` (не общий хостовый `/data/downloads` с другими проектами).
 - **CPU/RAM**: в `docker-compose.egorvps.yml` заданы `cpu_shares` (ниже у воркера — при конкуренции ядра отдаются другим контейнерам), `mem_limit`, `cpus`.
 
-Docker не задаёт жёсткую квоту **10 GiB на диск** для named volume на overlay2; чтобы гарантировать потолок на хосте, создайте каталог на **XFS** с **project quota** или отдельный раздел и монтируйте его в том.
+Docker не задаёт жёсткую квоту **на диск** для named volume на overlay2; чтобы гарантировать потолок на хосте, создайте каталог на **XFS** с **project quota** или отдельный раздел и монтируйте его в том.
+
+**Смена размера tmpfs:** если `shared-tmpfs` уже создан, Docker может не обновить `driver_opts` до удаления тома (`docker compose down`, затем `docker volume rm <имя_тома_project_shared-tmpfs>` — осторожно, только для этого тома; данные на tmpfs и так временные).
 
 ## Сборка без перегруза CPU/диска
 
