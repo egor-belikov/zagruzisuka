@@ -1,5 +1,17 @@
 # Развёртывание zagruzisuka на egorvps (слабый VPS, рядом kinodolgoletie)
 
+## Миграция с другого VPS (например testvps)
+
+На **`egorvps` нет SSH-алиаса `testvps`** из твоего `~/.ssh/config`; проще гонять перенос **с ноутбука**, где есть ключи к обоим хостам:
+
+```bash
+chmod +x scripts/migrate_testvps_to_egorvps_from_laptop.sh
+./scripts/migrate_testvps_to_egorvps_from_laptop.sh
+# или: TESTVPS=user@test.host EGORVPS=user@egor.host ./scripts/...
+```
+
+Перед переносом создаётся **`/root/backups/zagruzisuka-migrate-<время>/`** с дампом Postgres, архивами томов и файлом **`ROLLBACK.txt`** (восстановить прежнее состояние на egorvps). После успешного запуска **остановите стек на источнике**, иначе два процесса с одним Telegram-ботом. Альтернатива, если на egorvps настроен DNS/SSH на источник: `bash scripts/migrate_from_testvps_to_egorvps.sh <хост>`.
+
 ## Лимиты в проекте
 
 - Раньше в compose стояло **~27 GiB tmpfs** — это был **потолок RAM-диска для временных файлов** во время скачивания/обработки, а не «вес проекта» и не склад готовых роликов на диске.
