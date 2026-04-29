@@ -90,6 +90,7 @@ services:
     volumes:
       - ./proxy/mihomo.yaml:/root/.config/mihomo/config.yaml
       - ./proxy/providers:/root/.config/mihomo/providers
+      - ./proxy/ruleset:/root/.config/mihomo/ruleset
 
 volumes:
   # Было COMPOSE_PROJECT_NAME=yt → том с данными Postgres на этом VPS называется yt_pgdata.

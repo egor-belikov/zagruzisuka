@@ -1,3 +1,9 @@
+# Mihomo: исходящие ноды — та же подписка, что и раньше (wizard).
+# «Списки» для заблокированных из РФ сервисов — rule-providers из
+# https://github.com/itdoginfo/allow-domains (как в рекомендациях вокруг
+# https://github.com/igareck/vpn-configs-for-russia — там же описаны сценарии
+# чёрный/белый список; сами URL подписок igareck здесь не используются).
+
 mixed-port: 10808
 allow-lan: true
 mode: rule
@@ -25,7 +31,25 @@ proxy-groups:
     interval: 300
     lazy: false
 
+rule-providers:
+  russia-inside-domain:
+    type: http
+    behavior: domain
+    format: mrs
+    url: https://github.com/itdoginfo/allow-domains/releases/latest/download/russia_inside_domain.mrs
+    path: ./ruleset/russia_inside_domain.mrs
+    interval: 43200
+  meta-ipcidr:
+    type: http
+    behavior: classical
+    format: mrs
+    url: https://github.com/itdoginfo/allow-domains/releases/latest/download/meta_ipcidr.mrs
+    path: ./ruleset/meta_ipcidr.mrs
+    interval: 43200
+
 rules:
+  - RULE-SET,russia-inside-domain,PROXY
+  - RULE-SET,meta-ipcidr,PROXY
   - IP-CIDR,149.154.160.0/20,PROXY
   - IP-CIDR,91.108.4.0/22,PROXY
   - IP-CIDR,91.108.8.0/22,PROXY
@@ -41,7 +65,6 @@ rules:
   - DOMAIN-SUFFIX,telegra.ph,PROXY
   - DOMAIN-SUFFIX,tdesktop.com,PROXY
   - DOMAIN-SUFFIX,telesco.pe,PROXY
-  # Meta / Instagram / TikTok и др. — иначе yt-dlp идёт в MATCH,DIRECT с российского IP.
   - DOMAIN-SUFFIX,instagram.com,PROXY
   - DOMAIN-SUFFIX,cdninstagram.com,PROXY
   - DOMAIN-SUFFIX,fbcdn.net,PROXY
@@ -50,4 +73,8 @@ rules:
   - DOMAIN-SUFFIX,tiktok.com,PROXY
   - DOMAIN-SUFFIX,tiktokv.com,PROXY
   - DOMAIN-SUFFIX,ttwstatic.com,PROXY
+  - DOMAIN-SUFFIX,pornhub.com,PROXY
+  - DOMAIN-SUFFIX,phncdn.com,PROXY
+  - DOMAIN-SUFFIX,phprcdn.com,PROXY
+  - GEOIP,ru,DIRECT
   - MATCH,DIRECT

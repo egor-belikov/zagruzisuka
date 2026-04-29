@@ -44,6 +44,12 @@ docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 
 Как и раньше: внешний том `yt_pgdata` (`docker-compose.yml`). На новом сервере: `docker volume create yt_pgdata` или перенос данных.
 
+## VPN / Mihomo (российский IP сервера)
+
+Сервис **`yt_proxy`** (`metacubex/mihomo`) читает [`proxy/mihomo.yaml`](proxy/mihomo.yaml). **Исходящий VPN** по-прежнему задаётся своей подпиской в `proxy-providers` (в репозитории — **wizard**, как было изначально). **Списки для правил** (что отправлять в прокси при блокировках из РФ) подтягиваются из [**itdoginfo/allow-domains**](https://github.com/itdoginfo/allow-domains) в `rule-providers`. Описание сценариев «чёрный/белый список» у оператора и подбор **публичных** подписок — справочно в [**igareck/vpn-configs-for-russia**](https://github.com/igareck/vpn-configs-for-russia); эти URL в проект в качестве нод **не подмешиваются**.
+
+После правки `mihomo.yaml`: `docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d yt_proxy`. **`YTDLP_PROXY`** / **`TELEGRAM_SOCKS5_PROXY`** — на `mixed-port` из YAML (по умолчанию **10808**).
+
 ## Удаление после отправки в Telegram
 
 После успешной (или неуспешной) обработки сценария бот в `SuccessDownloadHandler._cleanup()` вызывает `remove_dir(self._body.media.root_path)` — каталог задачи с исходным видео и временными файлами **удаляется** в `finally` после `await` загрузки в Telegram (`upload_task` дожидается завершения). **Постоянных копий медиа на диске сервера нет**: воркер не копирует файлы в `STORAGE_PATH`; из бота в очередь всегда уходит `save_to_storage=False`.
