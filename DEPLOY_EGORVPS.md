@@ -23,7 +23,7 @@ chmod +x scripts/migrate_testvps_to_egorvps_from_laptop.sh
 
 Docker не задаёт жёсткую квоту **на диск** для named volume на overlay2; чтобы гарантировать потолок на хосте, создайте каталог на **XFS** с **project quota** или отдельный раздел и монтируйте его в том.
 
-**Смена размера tmpfs:** если `shared-tmpfs` уже создан, Docker может не обновить `driver_opts` до удаления тома (`docker compose down`, затем `docker volume rm <имя_тома_project_shared-tmpfs>` — осторожно, только для этого тома; данные на tmpfs и так временные).
+**Смена размера tmpfs:** если `shared-tmpfs` уже создан, Docker может не обновить `driver_opts` до удаления тома. На вопрос compose *«Volume … doesn't match configuration. Recreate?»* можно ответить **`y`** (это только временные файлы загрузок). Без интерактива: остановить стек или сервисы **`yt_worker`** и **`yt_bot`**, выполнить `docker volume rm zagruzisuka_shared-tmpfs`, затем `docker compose … up -d`. Имя тома совпадает с префиксом проекта (`name: zagruzisuka` в compose).
 
 ## Сборка без перегруза CPU/диска
 
