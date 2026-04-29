@@ -26,6 +26,10 @@ except ImportError:
     from ytdl_opts.default import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
 
 _DEFAULT_MAX_FILESIZE = 10 * 1024 * 1024 * 1024
+_DEFAULT_SOCKET_TIMEOUT = 120
+_DEFAULT_RETRIES = 15
+_DEFAULT_FRAGMENT_RETRIES = 50
+_DEFAULT_CONCURRENT_FRAGMENTS = 1
 _STREAMFF_HOSTS = {
     'streamff.com',
     'www.streamff.com',
@@ -51,6 +55,17 @@ def _first_env_proxy() -> str | None:
     return None
 
 
+def _env_positive_int(key: str, default: int) -> int:
+    raw = (os.environ.get(key) or '').strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw, 10)
+    except ValueError:
+        return default
+    return n if n > 0 else default
+
+
 def _merge_global_ytdl_opts(opts: dict) -> dict:
     out = dict(opts)
     # Пробелы/юникод в имени файла ломают HLS-склейку (fragment.part-FragN) на tmpfs — см. FileNotFoundError в логах.
@@ -71,6 +86,22 @@ def _merge_global_ytdl_opts(opts: dict) -> dict:
                 out['max_filesize'] = _DEFAULT_MAX_FILESIZE
         else:
             out['max_filesize'] = _DEFAULT_MAX_FILESIZE
+    # Длинный HLS + прокси: SSL/read timeout и параллельная закачка фрагментов дают
+    # «fragment not found; Skipping» и затем FileNotFoundError на .part-FragN при merge.
+    if 'socket_timeout' not in out:
+        out['socket_timeout'] = _env_positive_int(
+            'YTDLP_SOCKET_TIMEOUT', _DEFAULT_SOCKET_TIMEOUT
+        )
+    if 'retries' not in out:
+        out['retries'] = _env_positive_int('YTDLP_RETRIES', _DEFAULT_RETRIES)
+    if 'fragment_retries' not in out:
+        out['fragment_retries'] = _env_positive_int(
+            'YTDLP_FRAGMENT_RETRIES', _DEFAULT_FRAGMENT_RETRIES
+        )
+    if 'concurrent_fragment_downloads' not in out:
+        out['concurrent_fragment_downloads'] = _env_positive_int(
+            'YTDLP_CONCURRENT_FRAGMENTS', _DEFAULT_CONCURRENT_FRAGMENTS
+        )
     return out
 
 
