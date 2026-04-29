@@ -53,6 +53,9 @@ def _first_env_proxy() -> str | None:
 
 def _merge_global_ytdl_opts(opts: dict) -> dict:
     out = dict(opts)
+    # Пробелы/юникод в имени файла ломают HLS-склейку (fragment.part-FragN) на tmpfs — см. FileNotFoundError в логах.
+    if 'restrictfilenames' not in out:
+        out['restrictfilenames'] = True
     if out.get('proxy') in (None, ''):
         p = _first_env_proxy()
         if p:
