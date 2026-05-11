@@ -35,6 +35,8 @@ _STREAMFF_HOSTS = {
     'www.streamff.com',
     'streamff.link',
     'www.streamff.link',
+    'streamff.ink',
+    'www.streamff.ink',
 }
 _STREAMFF_PATH_RE = re.compile(r'^/v/(?P<share_id>[A-Za-z0-9_-]+)(?:/)?$')
 _STREAMFF_CDN_MEDIA_TPL = 'https://cdn.streamff.one/{share_id}.mp4'
