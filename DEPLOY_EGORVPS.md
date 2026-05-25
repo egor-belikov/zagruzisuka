@@ -1,5 +1,26 @@
 # Развёртывание zagruzisuka на egorvps (слабый VPS, рядом kinodolgoletie)
 
+## Обычный деплой (обновление с GitHub на сервере)
+
+Репозиторий на сервере держится в синхроне с **`origin`**; выкладка изменений по коду и конфигам в репо — только **`git pull`**, без ручного `rsync` отдельных файлов с ноутбука.
+
+```bash
+cd /root/my_projects/zagruzisuka
+
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+
+chmod +x scripts/build-low-resource.sh  # если ещё не
+./scripts/build-low-resource.sh
+docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
+```
+
+- `./scripts/build-low-resource.sh` снижает нагрузку BuildKit на слабом VPS (см. раздел ниже); при желании можно вместо него выполнить `docker compose … build`.
+- Если менялись только файлы без Docker-контекста (`*.md`), достаточно `git pull` и при необходимости `compose up -d yt_proxy`, без полной сборки.
+
+Если **`git pull` ругается на локальные правки**, на боевом клоне лучше не править код вручную: сохраните нужное в другом месте, затем `git restore .` или `git reset --hard origin/main` и повторите `pull`, либо `git stash` → `pull` → `stash pop`.
+
 ## Миграция с другого VPS (например testvps)
 
 На **`egorvps` нет SSH-алиаса `testvps`** из твоего `~/.ssh/config`; проще гонять перенос **с ноутбука**, где есть ключи к обоим хостам:
