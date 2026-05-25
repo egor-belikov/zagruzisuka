@@ -7,9 +7,12 @@
 ```bash
 cd /root/my_projects/zagruzisuka
 
-git fetch origin
-git checkout main
-git pull --ff-only origin main
+# при «detected dubious ownership» на клоне под root — одноразово, без global config:
+GIT="git -c safe.directory=/root/my_projects/zagruzisuka"
+
+$GIT fetch origin
+$GIT checkout main
+$GIT pull --ff-only origin main
 
 chmod +x scripts/build-low-resource.sh  # если ещё не
 ./scripts/build-low-resource.sh
@@ -20,6 +23,8 @@ docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 - Если менялись только файлы без Docker-контекста (`*.md`), достаточно `git pull` и при необходимости `compose up -d yt_proxy`, без полной сборки.
 
 Если **`git pull` ругается на локальные правки**, на боевом клоне лучше не править код вручную: сохраните нужное в другом месте, затем `git restore .` или `git reset --hard origin/main` и повторите `pull`, либо `git stash` → `pull` → `stash pop`.
+
+**После ручного `rsync` или правок на сервере** дерево может разойтись с GitHub; тогда нормальный путь — снова выровнять клон под `origin` (например `git fetch && git reset --hard origin/main && git clean -fd`) и только потом обычный деплой. **Не держите на сервере уникальные секреты внутри отслеживаемых файлов** — при `reset --hard` они пропадут; вынесите в `envs/*.env` вне репо или в Docker secrets.
 
 ## Миграция с другого VPS (например testvps)
 
