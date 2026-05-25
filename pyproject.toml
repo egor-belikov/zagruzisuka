@@ -45,6 +45,9 @@ ignore = [
     "TRY003",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"app_worker/worker/bunkr_resolver.py" = ["RUF001", "S310"]
+
 [tool.ruff.format]
 indent-style = "space"
 quote-style = "single"

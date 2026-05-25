@@ -16,6 +16,7 @@ from yt_shared.schemas.media import Audio, DownMedia, InbMediaPayload, Video
 from yt_shared.utils.common import format_bytes, gen_random_str
 from yt_shared.utils.file import file_size, list_files_human, remove_dir
 
+from worker.bunkr_resolver import resolve_if_bunkr
 from worker.core.config import settings
 from worker.core.exceptions import MediaDownloaderError
 from ytdl_opts.per_host._base import AbstractHostConfig
@@ -25,7 +26,9 @@ try:
 except ImportError:
     from ytdl_opts.default import FINAL_AUDIO_FORMAT, FINAL_THUMBNAIL_FORMAT
 
-_DEFAULT_MAX_FILESIZE = 1024 * 1024 * 1024  # 1 GiB; env YTDLP_MAX_FILESIZE_BYTES или 0 = без лимита
+_DEFAULT_MAX_FILESIZE = (
+    1024 * 1024 * 1024
+)  # 1 GiB; env YTDLP_MAX_FILESIZE_BYTES или 0 = без лимита
 _DEFAULT_SOCKET_TIMEOUT = 120
 _DEFAULT_RETRIES = 15
 _DEFAULT_FRAGMENT_RETRIES = 50
@@ -160,14 +163,16 @@ class MediaDownloader:
         )
 
     def _probe_video_duration(self, opts: dict, resolved_url: str) -> float | None:
-        skip = frozenset({
-            'progress_hooks',
-            'postprocessors',
-            'forceprint',
-            'print_to_file',
-            'writesubtitles',
-            'writeautomaticsub',
-        })
+        skip = frozenset(
+            {
+                'progress_hooks',
+                'postprocessors',
+                'forceprint',
+                'print_to_file',
+                'writesubtitles',
+                'writeautomaticsub',
+            }
+        )
         probe_opts = {k: v for k, v in opts.items() if k not in skip}
         probe_opts['quiet'] = True
         probe_opts['no_warnings'] = True
@@ -235,12 +240,17 @@ class MediaDownloader:
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
+
+        bunker_res = resolve_if_bunkr(url, self._log)
         resolved_url = url
         try:
             resolved_url = _resolve_streamff_direct_url(url)
         except Exception:
             self._log.warning('Failed to resolve streamff direct URL for %s', url)
-        if resolved_url != url:
+        if bunker_res is not None:
+            resolved_url = bunker_res.direct_url
+            self._log.info('Bunkr page %s resolved to CDN URL', url)
+        elif resolved_url != url:
             self._log.info('Resolved %s to direct URL %s', url, resolved_url)
         self._log.info('Downloading %s, media_type %s', url, media_type)
         tmp_down_path = settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOAD_DIR
@@ -252,6 +262,11 @@ class MediaDownloader:
             )
 
             opts = _merge_global_ytdl_opts(dict(ytdl_opts_model.ytdl_opts))
+            if bunker_res is not None:
+                hdrs = dict(opts.get('http_headers') or {})
+                hdrs.update(bunker_res.http_headers)
+                opts['http_headers'] = hdrs
+
             hooks = list(opts.get('progress_hooks') or [])
             if progress_hook:
                 hooks.append(progress_hook)
@@ -278,6 +293,9 @@ class MediaDownloader:
                     err_msg = 'Error during media download. Check logs.'
                     self._log.error('%s. Meta: %s', err_msg, meta)
                     raise MediaDownloaderError(err_msg)
+
+                if bunker_res is not None and bunker_res.page_title:
+                    meta['title'] = bunker_res.page_title
 
                 current_files = list(curr_tmp_dir.iterdir())
                 if not current_files:

@@ -47,6 +47,12 @@ docker compose -f docker-compose.yml -f docker-compose.egorvps.yml up -d
 
 Как и раньше: внешний том `yt_pgdata` (`docker-compose.yml`). На новом сервере: `docker volume create yt_pgdata` или перенос данных.
 
+## Bunkr (bunkr.si и зеркала)
+
+- Отдельная стадия перед yt-dlp: разбор страницы вида `https://bunkr.<tld>/f/…` (и `/v/`, `/i/`, `/d/`), вызов официального Bunkr API (`apidl.bunkr.ru`) и скачивание уже **прямой** ссылки через yt-dlp.
+- Поддерживаются **все известные домены** из gallery-dl (`bunkr.si`, `.fi`, `.sk`, `.black`, …) плюс любой `bunkr+.<tld>` по шаблону; при ошибке на одном зеркале воркер **перебирает другие** тот же путь.
+- Прокси те же, что у yt-dlp: `YTDLP_PROXY` / системные `*_PROXY` подхватываются и при запросе к Bunkr-странице.
+
 ## VPN / Mihomo (российский IP сервера)
 
 Сервис **`yt_proxy`** (`metacubex/mihomo`) читает [`proxy/mihomo.yaml`](proxy/mihomo.yaml). **Исходящий VPN** по-прежнему задаётся своей подпиской в `proxy-providers` (в репозитории — **wizard**, как было изначально). **Списки для правил** (что отправлять в прокси при блокировках из РФ) подтягиваются из [**itdoginfo/allow-domains**](https://github.com/itdoginfo/allow-domains) в `rule-providers`. Описание сценариев «чёрный/белый список» у оператора и подбор **публичных** подписок — справочно в [**igareck/vpn-configs-for-russia**](https://github.com/igareck/vpn-configs-for-russia); эти URL в проект в качестве нод **не подмешиваются**.
