@@ -17,7 +17,10 @@ from yt_shared.utils.common import format_bytes, gen_random_str
 from yt_shared.utils.file import file_size, list_files_human, remove_dir
 
 from worker.bunkr_resolver import resolve_if_bunkr
+from worker.sports_ru_resolver import resolve_if_sports_ru
+from worker.veed_resolver import resolve_if_veed
 from worker.core.config import settings
+from worker.core.download_errors import format_download_failure
 from worker.core.exceptions import MediaDownloaderError
 from ytdl_opts.per_host._base import AbstractHostConfig
 
@@ -43,6 +46,32 @@ _STREAMFF_HOSTS = {
 }
 _STREAMFF_PATH_RE = re.compile(r'^/v/(?P<share_id>[A-Za-z0-9_-]+)(?:/)?$')
 _STREAMFF_CDN_MEDIA_TPL = 'https://cdn.streamff.one/{share_id}.mp4'
+
+
+_DIRECT_YTDLP_HOST_SUFFIXES: frozenset[str] = frozenset(
+    (
+        'pornhub.com',
+        'pornhubpremium.com',
+        'phncdn.com',
+        'phprcdn.com',
+    )
+)
+
+
+def _ytdlp_should_bypass_proxy(url: str) -> bool:
+    """Sites reachable from RU VPS; Mihomo proxy returns broken interstitial pages."""
+    host = (urlsplit(url).hostname or '').lower()
+    if not host:
+        return False
+    return any(
+        host == suffix or host.endswith('.' + suffix)
+        for suffix in _DIRECT_YTDLP_HOST_SUFFIXES
+    )
+
+
+def _maybe_strip_proxy_for_direct_hosts(opts: dict, *urls: str) -> None:
+    if any(_ytdlp_should_bypass_proxy(u) for u in urls if u):
+        opts.pop('proxy', None)
 
 
 def _first_env_proxy() -> str | None:
@@ -242,6 +271,8 @@ class MediaDownloader:
         url = host_conf.url
 
         bunker_res = resolve_if_bunkr(url, self._log)
+        veed_res = resolve_if_veed(url, self._log)
+        sports_ru_res = resolve_if_sports_ru(url, self._log)
         resolved_url = url
         try:
             resolved_url = _resolve_streamff_direct_url(url)
@@ -250,6 +281,12 @@ class MediaDownloader:
         if bunker_res is not None:
             resolved_url = bunker_res.direct_url
             self._log.info('Bunkr page %s resolved to CDN URL', url)
+        elif veed_res is not None:
+            resolved_url = veed_res.direct_url
+            self._log.info('VEED page %s resolved to CDN URL', url)
+        elif sports_ru_res is not None:
+            resolved_url = sports_ru_res.direct_url
+            self._log.info('Sports.ru page %s resolved to HLS playlist URL', url)
         elif resolved_url != url:
             self._log.info('Resolved %s to direct URL %s', url, resolved_url)
         self._log.info('Downloading %s, media_type %s', url, media_type)
@@ -262,9 +299,18 @@ class MediaDownloader:
             )
 
             opts = _merge_global_ytdl_opts(dict(ytdl_opts_model.ytdl_opts))
+            _maybe_strip_proxy_for_direct_hosts(opts, url, resolved_url)
             if bunker_res is not None:
                 hdrs = dict(opts.get('http_headers') or {})
                 hdrs.update(bunker_res.http_headers)
+                opts['http_headers'] = hdrs
+            elif veed_res is not None:
+                hdrs = dict(opts.get('http_headers') or {})
+                hdrs.update(veed_res.http_headers)
+                opts['http_headers'] = hdrs
+            elif sports_ru_res is not None:
+                hdrs = dict(opts.get('http_headers') or {})
+                hdrs.update(sports_ru_res.http_headers)
                 opts['http_headers'] = hdrs
 
             hooks = list(opts.get('progress_hooks') or [])
@@ -288,18 +334,39 @@ class MediaDownloader:
                         resolved_url,
                         err,
                     )
-                    raise MediaDownloaderError(str(err)) from err
+                    raise MediaDownloaderError(
+                        format_download_failure(
+                            reason=str(err),
+                            url=url,
+                            resolved_url=resolved_url,
+                        )
+                    ) from err
                 if not meta:
-                    err_msg = 'Error during media download. Check logs.'
-                    self._log.error('%s. Meta: %s', err_msg, meta)
+                    err_msg = format_download_failure(
+                        reason='yt-dlp не вернул метаданные (extract_info вернул пустой результат).',
+                        url=url,
+                        resolved_url=resolved_url,
+                    )
+                    self._log.error('%s Meta: %s', err_msg, meta)
                     raise MediaDownloaderError(err_msg)
 
                 if bunker_res is not None and bunker_res.page_title:
                     meta['title'] = bunker_res.page_title
+                elif veed_res is not None and veed_res.page_title:
+                    meta['title'] = veed_res.page_title
+                elif sports_ru_res is not None and sports_ru_res.page_title:
+                    meta['title'] = sports_ru_res.page_title
 
                 current_files = list(curr_tmp_dir.iterdir())
                 if not current_files:
-                    err_msg = 'Nothing downloaded. Is URL valid?'
+                    err_msg = format_download_failure(
+                        reason=(
+                            'yt-dlp завершился без файлов в рабочей директории '
+                            '(возможно, неверный URL или формат недоступен).'
+                        ),
+                        url=url,
+                        resolved_url=resolved_url,
+                    )
                     self._log.error(err_msg)
                     raise MediaDownloaderError(err_msg)
 

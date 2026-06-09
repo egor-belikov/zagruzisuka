@@ -47,6 +47,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "app_worker/worker/bunkr_resolver.py" = ["RUF001", "S310"]
+"app_worker/worker/sports_ru_resolver.py" = ["RUF001", "S310"]
+"app_worker/worker/veed_resolver.py" = ["S310"]
 
 [tool.ruff.format]
 indent-style = "space"

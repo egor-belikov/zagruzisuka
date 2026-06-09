@@ -100,17 +100,18 @@ class InboundPayloadHandler:
 
         """
         task = err.task
+        reason = str(err).strip() or err.__class__.__name__
         err_payload = ErrorDownloadPayload(
             task_id=task.id,
             message_id=task.message_id,
             from_chat_id=media_payload.from_chat_id,
             from_chat_type=media_payload.from_chat_type,
             from_user_id=media_payload.from_user_id,
-            message='Download error',
+            message=reason,
             url=media_payload.url,
             context=media_payload,
             yt_dlp_version=ytdlp_version.__version__,
-            exception_msg=str(err),
+            exception_msg=reason,
             exception_type=err.__class__.__name__,
         )
         await self._rmq_publisher.send_download_error(err_payload)
@@ -126,13 +127,14 @@ class InboundPayloadHandler:
 
         """
         task: Task | None = getattr(err, 'task', None)
+        reason = str(err).strip() or err.__class__.__name__
         err_payload = ErrorDownloadGeneralPayload(
             task_id=task.id if task else 'N/A',
             message_id=media_payload.message_id,
             from_chat_id=media_payload.from_chat_id,
             from_chat_type=media_payload.from_chat_type,
             from_user_id=media_payload.from_user_id,
-            message='General worker error',
+            message=reason,
             url=media_payload.url,
             context=media_payload,
             yt_dlp_version=ytdlp_version.__version__,

@@ -54,13 +54,14 @@ class SuccessDownloadHandler(AbstractDownloadHandler):
             )
 
     async def _publish_error_message(self, err: Exception) -> None:
+        reason = str(err).strip() or err.__class__.__name__
         err_payload = ErrorDownloadGeneralPayload(
             task_id=self._body.task_id,
             message_id=self._body.message_id,
             from_chat_id=self._body.from_chat_id,
             from_chat_type=self._body.from_chat_type,
             from_user_id=self._body.from_user_id,
-            message='Upload error',
+            message=reason,
             url=self._body.context.url,
             context=self._body.context,
             yt_dlp_version=self._body.yt_dlp_version,

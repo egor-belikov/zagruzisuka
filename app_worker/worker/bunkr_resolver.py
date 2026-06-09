@@ -3,12 +3,11 @@
 Bunker uses many mirror domains (.si, .fi, bunkr+.TLD etc.); if one mirror is blocked
 by Cloudflare, we retry other mirrors with the same path (same behaviour as gallery-dl).
 
-Logic aligned with gallery-dl's bunkr extractor (API + XOR when encrypted).
+Logic aligned with gallery-dl's bunkr extractor (page jsCDN + signed CDN token, 2026+).
 """
 
 from __future__ import annotations
 
-import binascii
 import html as html_stdlib
 import json
 import logging  # noqa: TC003 — runtime logger, not type-only
@@ -20,7 +19,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit, urlparse
 
 
 def _raise_dl(msg: str, cause: BaseException | None = None) -> NoReturn:
@@ -63,9 +62,6 @@ _LEGACY_MIRRORS: frozenset[str] = frozenset(
 )
 _ALL_KNOWN: frozenset[str] = frozenset(_PRIMARY_MIRRORS) | _LEGACY_MIRRORS
 
-_API_ENDPOINT = 'https://apidl.bunkr.ru/api/_001_v2'
-_ROOT_DL = 'https://get.bunkrr.su'
-
 _USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -76,6 +72,8 @@ _DATA_FILE_ID_RE = re.compile(
     r'data-file-id\s*=\s*"([^"]+)"', re.MULTILINE | re.IGNORECASE
 )
 _OG_TITLE_RE = re.compile(r'property="og:title"\s+content="([^"]*)"', re.IGNORECASE)
+_JS_CDN_RE = re.compile(r'var\s+jsCDN\s*=\s*"([^"]+)"', re.IGNORECASE)
+_JS_SIGN_URL_RE = re.compile(r'var\s+signUrl\s*=\s*"([^"]+)"', re.IGNORECASE)
 
 _GENERIC_BUNKR_HOST_RE = re.compile(
     r'^(?:www\.)?(?:app\.)?(?P<core>bunkr+\.[a-z0-9][a-z0-9.-]*[a-z0-9]?)$'
@@ -146,20 +144,73 @@ def _urllib_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
-def _xor_decrypt_b64_payload(encrypted_b64: str, timestamp: int) -> str:
-    key = ('SECRET_KEY_' + str(timestamp // 3600)).encode()
-    encrypted = binascii.a2b_base64(encrypted_b64)
-    return bytes(v ^ key[i % len(key)] for i, v in enumerate(encrypted)).decode()
+def _unescape_js_string(raw: str) -> str:
+    return raw.replace('\\/', '/')
 
 
-def _decode_api_file_url(payload: dict) -> str | None:
-    ts = payload.get('timestamp')
-    url_field = payload.get('url')
-    if not isinstance(url_field, str) or not isinstance(ts, int):
+def _extract_player_vars(html: str) -> tuple[str, str] | None:
+    """Parse jsCDN + signUrl embedded in the Bunkr file page (2026+ token flow)."""
+    js_m = _JS_CDN_RE.search(html)
+    sign_m = _JS_SIGN_URL_RE.search(html)
+    if js_m is None or sign_m is None:
         return None
-    if payload.get('encrypted'):
-        return _xor_decrypt_b64_payload(url_field, ts)
-    return url_field
+    js_cdn = _unescape_js_string(js_m.group(1).strip())
+    sign_url = _unescape_js_string(sign_m.group(1).strip())
+    if not js_cdn.startswith(('http://', 'https://')):
+        return None
+    if not sign_url.startswith(('http://', 'https://')):
+        return None
+    return js_cdn, sign_url
+
+
+def _sign_cdn_url(
+    opener: urllib.request.OpenerDirector,
+    js_cdn: str,
+    sign_url: str,
+    page_referer: str,
+) -> str:
+    """Exchange CDN path for short-lived token query params (gallery-dl gh#9554)."""
+    path = urlparse(js_cdn).path
+    if not path:
+        _raise_dl('Bunkr: пустой путь CDN в jsCDN.')
+
+    sign_req_url = sign_url + '?path=' + quote(path, safe='')
+    req = urllib.request.Request(
+        sign_req_url,
+        headers={
+            'User-Agent': _USER_AGENT,
+            'Accept': 'application/json,*/*',
+            'Referer': page_referer,
+        },
+        method='GET',
+    )
+    try:
+        with opener.open(req, timeout=120) as resp:
+            raw = resp.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as exc:
+        detail = ''
+        try:
+            if exc.fp:
+                detail = exc.fp.read().decode('utf-8', 'replace')
+        except OSError:
+            pass
+        _raise_dl(
+            f'Bunkr sign API недоступен (HTTP {exc.code}). Ответ: {detail[:300]}',
+            cause=exc,
+        )
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _raise_dl(f'Bunkr sign API вернул не-JSON: {raw[:240]}', cause=exc)
+
+    if not isinstance(payload, dict):
+        _raise_dl(f'Bunkr sign API: ожидался объект JSON, получено: {payload!r}')
+
+    query = urlencode({str(k): str(v) for k, v in payload.items()})
+    if not query:
+        _raise_dl(f'Bunkr sign API: пустой ответ: {payload!r}')
+    return js_cdn + '?' + query
 
 
 def _mirror_roots_for_retries(preferred_host: str) -> list[str]:
@@ -228,41 +279,6 @@ def _extract_meta(html: str) -> tuple[str, str | None]:
     return file_id, title
 
 
-def _post_file_api(opener: urllib.request.OpenerDirector, file_id: str) -> dict:
-    referer = f'{_ROOT_DL}/file/{file_id}'
-    body = json.dumps({'id': file_id}).encode('utf-8')
-    req = urllib.request.Request(
-        _API_ENDPOINT,
-        data=body,
-        headers={
-            'User-Agent': _USER_AGENT,
-            'Content-Type': 'application/json',
-            'Referer': referer,
-            'Origin': _ROOT_DL,
-        },
-        method='POST',
-    )
-    try:
-        with opener.open(req, timeout=120) as resp:
-            out = resp.read().decode('utf-8', 'replace')
-    except urllib.error.HTTPError as exc:
-        detail = ''
-        try:
-            if exc.fp:
-                detail = exc.fp.read().decode('utf-8', 'replace')
-        except OSError:
-            pass
-        _raise_dl(
-            f'Bunkr API недоступен (HTTP {exc.code}). Ответ: {detail[:300]}',
-            cause=exc,
-        )
-
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError as exc:
-        _raise_dl(f'Bunkr API вернул не-JSON: {out[:240]}', cause=exc)
-
-
 def resolve_if_bunkr(url: str, log: logging.Logger) -> BunkrResolved | None:
     """Если это страница одного файла на bunker — вернуть прямую ссылку, иначе None."""
     from worker.core.exceptions import MediaDownloaderError  # noqa: PLC0415
@@ -297,25 +313,31 @@ def resolve_if_bunkr(url: str, log: logging.Logger) -> BunkrResolved | None:
             last_err = f'{root_host}: {err}'
             continue
 
+        player_vars = _extract_player_vars(html)
+        if player_vars is None:
+            last_err = (
+                f'{root_host}: нет jsCDN/signUrl на странице (Bunkr изменил разметку?)'
+            )
+            continue
+
+        js_cdn, sign_url = player_vars
         log.info(
-            'Bunkr file id extracted on %s, requesting API (%s)...',
+            'Bunkr file id=%s on %s (%s), signing CDN URL…',
+            file_id,
             root_host,
             page_title[:_LOG_PREVIEW_TITLE_CHARS] + '…'
             if page_title and len(page_title) > _LOG_PREVIEW_TITLE_CHARS
             else page_title,
         )
-        payload = _post_file_api(opener, file_id)
-        direct_url = _decode_api_file_url(payload)
-        if not isinstance(direct_url, str) or not direct_url.startswith(
-            ('http://', 'https://')
-        ):
-            _raise_dl(f'Bunkr API: непонятное поле url: {payload!r}')
+        try:
+            direct_url = _sign_cdn_url(opener, js_cdn, sign_url, page_url)
+        except MediaDownloaderError as err:
+            last_err = f'{root_host}: {err}'
+            continue
 
-        referer_dl = f'{_ROOT_DL}/file/{file_id}'
         hdrs = {
-            'Referer': referer_dl,
-            # Некоторые CDN проверяют Origin
-            'Origin': _ROOT_DL,
+            'Referer': page_url,
+            'Origin': f'https://{root_host}',
             'User-Agent': _USER_AGENT,
         }
 

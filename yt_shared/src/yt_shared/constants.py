@@ -19,6 +19,7 @@ TWITTER_HOSTS: Final[tuple[str, ...]] = (
     'www.t.co',
 )
 FACEBOOK_HOSTS: Final[tuple[str, ...]] = ('facebook.com', 'www.facebook.com')
+VEED_HOSTS: Final[tuple[str, ...]] = ('veed.io', 'www.veed.io')
 
 REMOVE_QUERY_PARAMS_HOSTS: Final[set[str]] = {
     *TWITTER_HOSTS,
