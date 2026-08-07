@@ -29,38 +29,20 @@ proxy-providers:
       url: https://connectivitycheck.gstatic.com/generate_204
 
 proxy-groups:
-  # Приоритет — Нидерланды, резерв — Швеция, затем любая живая нода подписки.
-  # Здоровье проверяем по api.telegram.org: именно он нужен боту, и обрыв
-  # на нём должен переключать ноду, а не просто логироваться.
-  - name: NL
-    type: fallback
-    use:
-      - wizard
-    filter: "(?i)нидерланд|netherlands|holland"
-    url: https://api.telegram.org
-    interval: 300
-    lazy: false
-
-  - name: SE
-    type: fallback
-    use:
-      - wizard
-    filter: "(?i)швец|sweden"
-    url: https://api.telegram.org
-    interval: 300
-    lazy: false
-
+  # url-test, а не fallback со списком стран: mihomo не умеет мерить здоровье
+  # вложенной группы — подгруппы NL/SE отдавали alive=false с delay 0, и PROXY
+  # проваливался мимо них на первую «сырую» ноду подписки (Швецию, вдвое
+  # медленнее Нидерландов). url-test выбирает по реальной задержке до
+  # api.telegram.org, то есть сам садится на быстрейшую живую ноду и сам
+  # уходит с упавшей. Проверяем именно api.telegram.org: он нужен боту.
   - name: PROXY
-    type: fallback
-    proxies:
-      - NL
-      - SE
+    type: url-test
     use:
       - wizard
     url: https://api.telegram.org
     interval: 300
     lazy: false
-    tolerance: 200
+    tolerance: 150
 
 rule-providers:
   russia-inside-domain:
