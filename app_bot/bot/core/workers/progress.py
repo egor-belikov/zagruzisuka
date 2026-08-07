@@ -36,6 +36,18 @@ class ProgressDownloadResultWorker(AbstractDownloadResultWorker):
                     self._log.debug('Progress log edit skipped (message removed)')
                 except Exception:
                     self._log.debug('Progress log edit failed', exc_info=True)
+            if body.pulse_text:
+                try:
+                    await self._bot.send_message(
+                        chat_id=body.from_chat_id,
+                        text=body.pulse_text[:4090],
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=(
+                            body.pipeline_log_message_id or body.ack_message_id
+                        ),
+                    )
+                except Exception:
+                    self._log.debug('Progress pulse send failed', exc_info=True)
         else:
             url = html.escape(body.url[:220])
             if detail:

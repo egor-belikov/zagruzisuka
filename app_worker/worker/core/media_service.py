@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Coroutine
 from pathlib import Path
@@ -52,6 +53,10 @@ class MediaService:
         self._last_db_progress_write: float = 0.0
         self._publish_user_progress: bool = True
         self._final_progress_transcript: str = ''
+        self._download_plan_lines: list[str] = []
+        self._pulse_interval: float = float(
+            os.environ.get('DOWNLOAD_PROGRESS_PULSE_SECONDS', '180')
+        )
 
     async def process(self) -> tuple[DownMedia | None, Task | None, str]:
         self._task = await self._repository.get_or_create_task(self._media_payload)
@@ -226,6 +231,8 @@ class MediaService:
             bottom.append(self._current_phase_label)
 
         sections: list[str] = []
+        if self._download_plan_lines:
+            sections.append('\n'.join(self._download_plan_lines))
         if s := '\n'.join(pre).strip():
             sections.append(s)
         if s := yblock.strip():
@@ -234,7 +241,9 @@ class MediaService:
             sections.append(s)
         return '\n'.join(sections)
 
-    async def _send_progress_line(self, line: str) -> None:
+    async def _send_progress_line(
+        self, line: str, *, pulse_text: str | None = None
+    ) -> None:
         if self._media_payload.ack_message_id is None:
             return
         if self._media_payload.from_chat_id is None:
@@ -248,6 +257,7 @@ class MediaService:
                 pipeline_log_message_id=self._media_payload.pipeline_log_message_id,
                 url=self._media_payload.url[:512],
                 line=line[:4000],
+                pulse_text=pulse_text[:500] if pulse_text else None,
             )
             await publisher.send_download_progress(payload)
         now = time.monotonic()
@@ -261,6 +271,27 @@ class MediaService:
     async def _snapshot_progress_to_user(self) -> None:
         """Push full timeline + latest yt-dlp line to Telegram (HTML <pre> on bot side)."""
         await self._send_progress_line(self._compose_progress_body())
+
+    async def _send_progress_pulse(self, pulse_text: str) -> None:
+        await self._send_progress_line(
+            self._compose_progress_body(),
+            pulse_text=pulse_text,
+        )
+
+    async def _apply_download_plan(self, plan: dict) -> None:
+        duration_label = plan.get('duration_label') or '—'
+        quality = plan.get('quality_label') or '?'
+        lines = [
+            f'📺 Rutube · длительность {duration_label} · {quality}',
+        ]
+        if plan.get('low_quality'):
+            lines[0] += ' (длинное видео)'
+        if plan.get('no_proxy'):
+            lines.append('🌐 Скачивание напрямую с CDN Rutube (без прокси)')
+        if eta := plan.get('eta_hint'):
+            lines.append(f'⏱ {eta}')
+        self._download_plan_lines = lines
+        await self._snapshot_progress_to_user()
 
     async def _phase(self, step: str) -> None:
         now = time.monotonic()
@@ -291,6 +322,15 @@ class MediaService:
         await self._finalize_current_phase()
         loop = asyncio.get_running_loop()
         last_ts = [0.0]
+        last_pulse = [0.0]
+
+        def _done(f: asyncio.Future) -> None:
+            try:
+                exc = f.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                self._log.debug('progress publish failed: %s', exc)
 
         def _schedule_snapshot(*, force: bool) -> None:
             now = time.monotonic()
@@ -301,16 +341,37 @@ class MediaService:
                 self._snapshot_progress_to_user(),
                 loop,
             )
-
-            def _done(f: asyncio.Future) -> None:
-                try:
-                    exc = f.exception()
-                except asyncio.CancelledError:
-                    return
-                if exc:
-                    self._log.debug('progress publish failed: %s', exc)
-
             fut.add_done_callback(_done)
+
+        def _maybe_schedule_pulse(d: dict) -> None:
+            now = time.monotonic()
+            if now - last_pulse[0] < self._pulse_interval:
+                return
+            last_pulse[0] = now
+            percent = str(d.get('_percent_str') or '').strip()
+            speed = str(d.get('_speed_str') or '').strip()
+            eta = str(d.get('_eta_str') or '').strip()
+            headline = f'⏳ Ещё качаю{f": {percent}" if percent else ""}'
+            details = ' · '.join(
+                part
+                for part in (
+                    f'⚡ {speed}' if speed else '',
+                    f'ETA {eta}' if eta else '',
+                )
+                if part
+            )
+            pulse = f'{headline}\n{details}' if details else headline
+            fut = asyncio.run_coroutine_threadsafe(
+                self._send_progress_pulse(pulse),
+                loop,
+            )
+            fut.add_done_callback(_done)
+
+        def plan_hook(plan: dict) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self._apply_download_plan(plan),
+                loop,
+            )
 
         def progress_hook(d: dict) -> None:
             try:
@@ -333,6 +394,7 @@ class MediaService:
                     if not line:
                         return
                     self._bump_ytdlp_line(line)
+                    _maybe_schedule_pulse(d)
                     _schedule_snapshot(force=boundary)
                     return
                 line = MediaService._format_ytdlp_progress_line(d)
@@ -351,6 +413,7 @@ class MediaService:
                     host_conf=host_conf,
                     media_payload=self._media_payload,
                     progress_hook=progress_hook,
+                    plan_hook=plan_hook,
                 ),
             )
         except Exception as err:

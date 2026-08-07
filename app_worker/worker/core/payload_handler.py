@@ -10,6 +10,10 @@ from yt_shared.schemas.error import ErrorDownloadGeneralPayload, ErrorDownloadPa
 from yt_shared.schemas.media import DownMedia, InbMediaPayload
 from yt_shared.schemas.success import SuccessDownloadPayload
 
+from worker.bunkr_resolver import (
+    is_bunkr_album_page_url,
+    list_bunkr_album_file_page_urls,
+)
 from worker.core.downloader import MediaDownloader
 from worker.core.exceptions import DownloadVideoServiceError, GeneralVideoServiceError
 from worker.core.media_service import MediaService
@@ -33,6 +37,29 @@ class InboundPayloadHandler:
         except Exception as err:
             await self._send_general_error(err, media_payload)
 
+    async def _maybe_expand_bunkr_album(
+        self, media_payload: InbMediaPayload
+    ) -> InbMediaPayload:
+        if not is_bunkr_album_page_url(media_payload.url):
+            return media_payload
+        file_urls = list_bunkr_album_file_page_urls(media_payload.url, self._log)
+        if not file_urls:
+            return media_payload
+        for extra_url in file_urls[1:]:
+            extra = media_payload.model_copy(
+                update={
+                    'url': extra_url,
+                    'original_url': extra_url,
+                    'ack_message_id': None,
+                    'pipeline_log_message_id': None,
+                }
+            )
+            await self._rmq_publisher.send_for_download(extra)
+        self._log.info('Bunkr album expanded to %s file task(s)', len(file_urls))
+        return media_payload.model_copy(
+            update={'url': file_urls[0], 'original_url': file_urls[0]}
+        )
+
     async def _handle(self, media_payload: InbMediaPayload) -> None:
         """Process the media payload and handle any errors.
 
@@ -40,6 +67,7 @@ class InboundPayloadHandler:
             media_payload (InbMediaPayload): The inbound media payload to process.
 
         """
+        media_payload = await self._maybe_expand_bunkr_album(media_payload)
         async for session in get_db():
             media_service = MediaService(
                 media_payload=media_payload,

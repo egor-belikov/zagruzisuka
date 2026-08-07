@@ -9,6 +9,10 @@ from tempfile import TemporaryDirectory
 from typing import ClassVar
 from urllib.parse import urlsplit
 
+import ssl
+import urllib.error
+import urllib.request
+
 import yt_dlp
 from yt_dlp.utils import DownloadError
 from yt_shared.enums import DownMediaType
@@ -36,6 +40,12 @@ _DEFAULT_SOCKET_TIMEOUT = 120
 _DEFAULT_RETRIES = 15
 _DEFAULT_FRAGMENT_RETRIES = 50
 _DEFAULT_CONCURRENT_FRAGMENTS = 1
+# YouTube душит длинные одиночные соединения (~650 КБ/с при канале ноды в 47 Мбит/с).
+# Range-запросы кусками сбрасывают throttling: на замерах 2026-08 те же файлы шли
+# в 1.5–5 раз быстрее. Параллелить фрагменты вместо этого нельзя — из-за прокси
+# возвращаются «fragment not found» и FileNotFoundError на .part-FragN при merge,
+# поэтому _DEFAULT_CONCURRENT_FRAGMENTS остаётся 1.
+_DEFAULT_HTTP_CHUNK_SIZE = 10 * 1024 * 1024  # 0 = отключить чанки
 _STREAMFF_HOSTS = {
     'streamff.com',
     'www.streamff.com',
@@ -54,8 +64,49 @@ _DIRECT_YTDLP_HOST_SUFFIXES: frozenset[str] = frozenset(
         'pornhubpremium.com',
         'phncdn.com',
         'phprcdn.com',
+        'rutube.ru',
+        'youtube.com',
+        'youtu.be',
+        'googlevideo.com',
+        'ytimg.com',
     )
 )
+
+
+def _is_rutube_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or '').lower()
+    return host == 'rutube.ru' or host.endswith('.rutube.ru')
+
+
+def _format_duration_ru(seconds: float | None) -> str:
+    if seconds is None or seconds != seconds or seconds < 0:
+        return '—'
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, sec = divmod(rem, 60)
+    parts: list[str] = []
+    if h:
+        parts.append(f'{h} ч')
+    if m:
+        parts.append(f'{m} м')
+    if sec and not h:
+        parts.append(f'{sec} с')
+    return ' '.join(parts) if parts else f'{sec} с'
+
+
+def _estimate_download_eta_hint(filesize: int | None, duration: float | None) -> str:
+    if filesize and filesize > 0:
+        est_bytes = filesize
+    elif duration and duration > 0:
+        est_bytes = int(duration * 45_000)
+    else:
+        return 'время скачивания зависит от CDN'
+    fast = max(60.0, est_bytes / (800 * 1024))
+    slow = max(fast, est_bytes / (120 * 1024))
+    return (
+        f'ожидаемое скачивание: {_format_duration_ru(fast)}'
+        f' – {_format_duration_ru(slow)}'
+    )
 
 
 def _ytdlp_should_bypass_proxy(url: str) -> bool:
@@ -160,6 +211,16 @@ def _merge_global_ytdl_opts(opts: dict) -> dict:
         out['concurrent_fragment_downloads'] = _env_positive_int(
             'YTDLP_CONCURRENT_FRAGMENTS', _DEFAULT_CONCURRENT_FRAGMENTS
         )
+    if 'http_chunk_size' not in out:
+        # Не через _env_positive_int: там 0 откатывается к дефолту, а здесь
+        # 0 должен именно выключать чанки (ключ не попадает в opts).
+        raw = (os.environ.get('YTDLP_HTTP_CHUNK_SIZE') or '').strip()
+        try:
+            chunk = int(raw, 10) if raw else _DEFAULT_HTTP_CHUNK_SIZE
+        except ValueError:
+            chunk = _DEFAULT_HTTP_CHUNK_SIZE
+        if chunk > 0:
+            out['http_chunk_size'] = chunk
     return out
 
 
@@ -174,6 +235,61 @@ def _resolve_streamff_direct_url(url: str) -> str:
 
     return _STREAMFF_CDN_MEDIA_TPL.format(share_id=match.group('share_id'))
 
+
+
+
+def _bunkr_safe_filename(title: str | None, url: str) -> str:
+    base = (title or urlsplit(url).path.rsplit("/", 1)[-1] or "bunkr_media").strip()
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+    if not base.lower().endswith(".mp4"):
+        base += ".mp4"
+    return base[:200]
+
+
+def _bunkr_cdn_proxy() -> str | None:
+    raw = (os.environ.get('BUNKR_CDN_PROXY') or '').strip()
+    return raw or None
+
+
+def _bunkr_download_proxy_chain() -> list[str | None]:
+    chain: list[str | None] = [None]
+    for candidate in (
+        (os.environ.get('BUNKR_CDN_PROXY') or '').strip(),
+        _first_env_proxy() or '',
+    ):
+        if candidate and candidate not in chain:
+            chain.append(candidate)
+    return chain
+
+
+def _http_download_to_file(
+    source_url: str,
+    dest_path: Path,
+    headers: dict[str, str],
+    proxy: str | None,
+) -> int:
+    handlers: list = []
+    if proxy:
+        handlers.append(
+            urllib.request.ProxyHandler(
+                {"http": proxy, "https": proxy, "socks5": proxy, "socks": proxy}
+            )
+        )
+    handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    opener = urllib.request.build_opener(*handlers)
+    req_headers = dict(headers)
+    req_headers.setdefault("Accept", "*/*")
+    req = urllib.request.Request(source_url, headers=req_headers, method="GET")
+    with opener.open(req, timeout=300) as resp:
+        total = 0
+        with dest_path.open("wb") as out:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out.write(chunk)
+                total += len(chunk)
+    return total
 
 class MediaDownloader:
     _PLAYLIST_TYPE = 'playlist'
@@ -191,7 +307,7 @@ class MediaDownloader:
             settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOADED_DIR
         )
 
-    def _probe_video_duration(self, opts: dict, resolved_url: str) -> float | None:
+    def _probe_video_meta(self, opts: dict, resolved_url: str) -> dict | None:
         skip = frozenset(
             {
                 'progress_hooks',
@@ -222,20 +338,30 @@ class MediaDownloader:
                 return None
             info = first if isinstance(first, dict) else {}
         duration = info.get('duration')
-        if duration is None:
-            return None
-        try:
-            return float(duration)
-        except (TypeError, ValueError):
-            return None
+        filesize = info.get('filesize') or info.get('filesize_approx')
+        meta: dict = {}
+        if duration is not None:
+            try:
+                meta['duration'] = float(duration)
+            except (TypeError, ValueError):
+                pass
+        if filesize is not None:
+            try:
+                meta['filesize'] = int(filesize)
+            except (TypeError, ValueError):
+                pass
+        return meta or None
 
-    def _maybe_apply_long_video_low_format(self, opts: dict, resolved_url: str) -> None:
+    def _maybe_apply_long_video_low_format(
+        self, opts: dict, resolved_url: str
+    ) -> tuple[dict | None, bool]:
         threshold = _long_video_threshold_seconds()
-        if threshold is None:
-            return
-        duration = self._probe_video_duration(opts, resolved_url)
+        meta = self._probe_video_meta(opts, resolved_url)
+        if threshold is None or not meta:
+            return meta, False
+        duration = meta.get('duration')
         if duration is None or duration < threshold:
-            return
+            return meta, False
         fmt = _long_video_format_string()
         opts['format'] = fmt
         self._log.info(
@@ -244,28 +370,114 @@ class MediaDownloader:
             threshold,
             fmt,
         )
+        return meta, True
 
     def download(
         self,
         host_conf: AbstractHostConfig,
         media_payload: InbMediaPayload,
         progress_hook: Callable[[dict], None] | None = None,
+        plan_hook: Callable[[dict], None] | None = None,
     ) -> DownMedia:
         try:
             return self._download(
                 host_conf=host_conf,
                 media_payload=media_payload,
                 progress_hook=progress_hook,
+                plan_hook=plan_hook,
             )
         except Exception:
             self._log.error('Failed to download %s', host_conf.url)
             raise
+
+
+    def _download_bunkr_direct(
+        self,
+        *,
+        bunker_res,
+        url: str,
+        curr_tmp_dir: Path,
+        opts: dict,
+        progress_hook: Callable[[dict], None] | None,
+    ) -> dict:
+        filename = _bunkr_safe_filename(bunker_res.page_title, bunker_res.direct_url)
+        dest = curr_tmp_dir / filename
+        if progress_hook:
+            progress_hook({"status": "downloading", "_percent_str": "0%"})
+        try:
+            from worker.utils import get_cookies_opts_if_not_empty
+            hdrs = dict(bunker_res.http_headers)
+            ck = get_cookies_opts_if_not_empty()
+            if ck:
+                try:
+                    import http.cookiejar
+                    cj = http.cookiejar.MozillaCookieJar(ck[1])
+                    cj.load(ignore_discard=True, ignore_expires=True)
+                    hdrs['Cookie'] = '; '.join(f'{c.name}={c.value}' for c in cj)
+                except Exception:
+                    pass
+            last_http_err: urllib.error.HTTPError | None = None
+            size = 0
+            for proxy in _bunkr_download_proxy_chain():
+                try:
+                    size = _http_download_to_file(
+                        bunker_res.direct_url,
+                        dest,
+                        hdrs,
+                        proxy,
+                    )
+                    last_http_err = None
+                    break
+                except urllib.error.HTTPError as err:
+                    last_http_err = err
+                    if err.code in (403, 429):
+                        self._log.warning(
+                            'Bunkr CDN HTTP %s via proxy=%s, trying next path',
+                            err.code,
+                            proxy or 'direct',
+                        )
+                        continue
+                    raise
+            if last_http_err is not None:
+                raise last_http_err
+        except urllib.error.HTTPError as err:
+            raise MediaDownloaderError(
+                format_download_failure(
+                    reason=(
+                        f"Bunkr CDN HTTP {err.code}: {err.reason}. "
+                        "CDN prxp-b.cdn.cr блокирует IP датацентра (VPS и Wizard VPN). "
+                        "Экспортируй cookies из браузера на ПК (где Bunkr открывается) "
+                        "в /app/cookies/cookies.txt или укажи residential BUNKR_CDN_PROXY."
+                    ),
+                    url=url,
+                    resolved_url=bunker_res.direct_url,
+                )
+            ) from err
+        except Exception as err:
+            raise MediaDownloaderError(
+                format_download_failure(
+                    reason=str(err),
+                    url=url,
+                    resolved_url=bunker_res.direct_url,
+                )
+            ) from err
+        if progress_hook:
+            progress_hook({"status": "finished"})
+        title = bunker_res.page_title or filename
+        return {
+            "title": title,
+            "ext": dest.suffix.lstrip(".") or "mp4",
+            "_filename": str(dest),
+            "requested_downloads": [{"filepath": str(dest), "_filename": str(dest), "ext": "mp4"}],
+            "filesize": size,
+        }
 
     def _download(
         self,
         host_conf: AbstractHostConfig,
         media_payload: InbMediaPayload,
         progress_hook: Callable[[dict], None] | None = None,
+        plan_hook: Callable[[dict], None] | None = None,
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
@@ -318,60 +530,93 @@ class MediaDownloader:
                 hooks.append(progress_hook)
             opts['progress_hooks'] = hooks
 
+            probe_meta: dict | None = None
+            low_format = False
             if media_type in (DownMediaType.VIDEO, DownMediaType.AUDIO_VIDEO):
-                self._maybe_apply_long_video_low_format(opts, resolved_url)
+                probe_meta, low_format = self._maybe_apply_long_video_low_format(
+                    opts, resolved_url
+                )
 
-            with yt_dlp.YoutubeDL(opts) as ytdl:
-                self._log.info('Downloading "%s" to "%s"', resolved_url, curr_tmp_dir)
-                self._log.info('Downloading with options: %s', opts)
-
+            if plan_hook and _is_rutube_url(url):
+                meta = probe_meta or {}
+                duration = meta.get('duration')
+                filesize = meta.get('filesize')
                 try:
-                    meta: dict | None = ytdl.extract_info(resolved_url, download=True)
-                except DownloadError as err:
-                    self._log.error(
-                        'yt-dlp DownloadError for %s (resolved=%s): %s',
-                        url,
-                        resolved_url,
-                        err,
+                    plan_hook(
+                        {
+                            'duration_seconds': duration,
+                            'filesize': filesize,
+                            'low_quality': low_format,
+                            'quality_label': '360p' if low_format else 'обычное',
+                            'no_proxy': not opts.get('proxy'),
+                            'eta_hint': _estimate_download_eta_hint(filesize, duration),
+                            'duration_label': _format_duration_ru(duration),
+                        }
                     )
-                    raise MediaDownloaderError(
-                        format_download_failure(
-                            reason=str(err),
+                except Exception:
+                    self._log.debug('plan_hook failed', exc_info=True)
+
+            if bunker_res is not None:
+                self._log.info(
+                    'Downloading Bunkr CDN "%s" to "%s"', resolved_url, curr_tmp_dir
+                )
+                meta = self._download_bunkr_direct(
+                    bunker_res=bunker_res,
+                    url=url,
+                    curr_tmp_dir=curr_tmp_dir,
+                    opts=opts,
+                    progress_hook=progress_hook,
+                )
+                meta_sanitized = meta
+            else:
+                with yt_dlp.YoutubeDL(opts) as ytdl:
+                    self._log.info('Downloading "%s" to "%s"', resolved_url, curr_tmp_dir)
+                    self._log.info('Downloading with options: %s', opts)
+
+                    try:
+                        meta = ytdl.extract_info(resolved_url, download=True)
+                    except DownloadError as err:
+                        self._log.error(
+                            'yt-dlp DownloadError for %s (resolved=%s): %s',
+                            url,
+                            resolved_url,
+                            err,
+                        )
+                        raise MediaDownloaderError(
+                            format_download_failure(
+                                reason=str(err),
+                                url=url,
+                                resolved_url=resolved_url,
+                            )
+                        ) from err
+                    if not meta:
+                        err_msg = format_download_failure(
+                            reason='yt-dlp не вернул метаданные (extract_info вернул пустой результат).',
                             url=url,
                             resolved_url=resolved_url,
                         )
-                    ) from err
-                if not meta:
-                    err_msg = format_download_failure(
-                        reason='yt-dlp не вернул метаданные (extract_info вернул пустой результат).',
-                        url=url,
-                        resolved_url=resolved_url,
-                    )
-                    self._log.error('%s Meta: %s', err_msg, meta)
-                    raise MediaDownloaderError(err_msg)
+                        self._log.error('%s Meta: %s', err_msg, meta)
+                        raise MediaDownloaderError(err_msg)
 
-                if bunker_res is not None and bunker_res.page_title:
-                    meta['title'] = bunker_res.page_title
-                elif veed_res is not None and veed_res.page_title:
-                    meta['title'] = veed_res.page_title
-                elif sports_ru_res is not None and sports_ru_res.page_title:
-                    meta['title'] = sports_ru_res.page_title
+                    if veed_res is not None and veed_res.page_title:
+                        meta['title'] = veed_res.page_title
+                    elif sports_ru_res is not None and sports_ru_res.page_title:
+                        meta['title'] = sports_ru_res.page_title
 
-                current_files = list(curr_tmp_dir.iterdir())
-                if not current_files:
-                    err_msg = format_download_failure(
-                        reason=(
-                            'yt-dlp завершился без файлов в рабочей директории '
-                            '(возможно, неверный URL или формат недоступен).'
-                        ),
-                        url=url,
-                        resolved_url=resolved_url,
-                    )
-                    self._log.error(err_msg)
-                    raise MediaDownloaderError(err_msg)
+                    meta_sanitized = ytdl.sanitize_info(meta)
 
-                meta_sanitized = ytdl.sanitize_info(meta)
-
+            current_files = list(curr_tmp_dir.iterdir())
+            if not current_files:
+                err_msg = format_download_failure(
+                    reason=(
+                        'Загрузка завершилась без файлов в рабочей директории '
+                        '(возможно, неверный URL или формат недоступен).'
+                    ),
+                    url=url,
+                    resolved_url=resolved_url,
+                )
+                self._log.error(err_msg)
+                raise MediaDownloaderError(err_msg)
             self._log.info('Finished downloading %s', url)
             self._log.debug('Downloaded "%s" meta: %s', url, meta_sanitized)
             self._log.info(

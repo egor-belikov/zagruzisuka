@@ -11,6 +11,12 @@ log-level: info
 external-controller: 0.0.0.0:9090
 secret: ""
 
+
+# Захардкоженных нод нет намеренно: IP такой ноды протухает молча
+# (117.55.202.45 умер, nl-3.wizard.select переехал на .223), а группа fallback
+# залипала на ней и весь Telegram/yt-dlp трафик вставал. Ноды берём только из
+# подписки — она сама обновляет адреса.
+
 proxy-providers:
   wizard:
     type: http
@@ -23,13 +29,38 @@ proxy-providers:
       url: https://connectivitycheck.gstatic.com/generate_204
 
 proxy-groups:
-  - name: PROXY
-    type: url-test
+  # Приоритет — Нидерланды, резерв — Швеция, затем любая живая нода подписки.
+  # Здоровье проверяем по api.telegram.org: именно он нужен боту, и обрыв
+  # на нём должен переключать ноду, а не просто логироваться.
+  - name: NL
+    type: fallback
     use:
       - wizard
-    url: https://connectivitycheck.gstatic.com/generate_204
+    filter: "(?i)нидерланд|netherlands|holland"
+    url: https://api.telegram.org
     interval: 300
     lazy: false
+
+  - name: SE
+    type: fallback
+    use:
+      - wizard
+    filter: "(?i)швец|sweden"
+    url: https://api.telegram.org
+    interval: 300
+    lazy: false
+
+  - name: PROXY
+    type: fallback
+    proxies:
+      - NL
+      - SE
+    use:
+      - wizard
+    url: https://api.telegram.org
+    interval: 300
+    lazy: false
+    tolerance: 200
 
 rule-providers:
   russia-inside-domain:
@@ -76,5 +107,16 @@ rules:
   - DOMAIN-SUFFIX,pornhub.com,PROXY
   - DOMAIN-SUFFIX,phncdn.com,PROXY
   - DOMAIN-SUFFIX,phprcdn.com,PROXY
+  # Bunkr: API/sign via VPN; worker CDN download also tries direct.
+  - DOMAIN-SUFFIX,bunkr.cr,PROXY
+  - DOMAIN-SUFFIX,bunkr.ru,PROXY
+  - DOMAIN-SUFFIX,bunkr.ph,PROXY
+  - DOMAIN-SUFFIX,bunkrr.su,PROXY
+  - DOMAIN-SUFFIX,apidl.bunkr.ru,PROXY
+  - DOMAIN-SUFFIX,cdn.cr,PROXY
+  - DOMAIN,get.bunkrr.su,PROXY
+  - DOMAIN,dl.bunkr.cr,PROXY
+  - DOMAIN,api.ipify.org,PROXY
+  - DOMAIN,ifconfig.me,PROXY
   - GEOIP,ru,DIRECT
   - MATCH,DIRECT

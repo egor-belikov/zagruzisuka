@@ -8,7 +8,14 @@ from yt_shared.emoji import SUCCESS_EMOJI
 from yt_shared.schemas.url import URL
 from yt_shared.utils.tasks.tasks import create_task as bg_create_task
 
+from urllib.parse import urlsplit
+
 from bot.bot.client import VideoBotClient
+
+
+def _is_rutube_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or '').lower()
+    return host == 'rutube.ru' or host.endswith('.rutube.ru')
 from bot.core.queue_status import build_queue_dashboard, download_workflow_backlog_count
 from bot.core.service import UrlParser, UrlService
 from bot.core.utils import bold, get_user_id
@@ -127,10 +134,14 @@ class TelegramCallback:
         url_objects = self._url_parser.parse_urls(urls=urls, context=context)
         enriched_urls: list[URL] = []
         for u in url_objects:
+            if _is_rutube_url(u.url):
+                log_pre = '📺 Rutube: определяю длительность и качество…'
+            else:
+                log_pre = '⏳ Журнал обновляется по этапам…'
             log_msg = await message.reply(
                 text=(
                     '<b>Лог скачивания и обработки</b>\n'
-                    '<pre>⏳ Журнал обновляется по этапам…</pre>'
+                    f'<pre>{log_pre}</pre>'
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_to_message_id=message.id,

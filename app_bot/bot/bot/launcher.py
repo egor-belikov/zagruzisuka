@@ -13,6 +13,7 @@ from bot.bot.client import VideoBotClient
 from bot.core.callbacks import TelegramCallback
 from bot.core.constants import SUPERADMIN_RESTART_NOTIFY_USER_ID
 from bot.core.config.config import get_main_config
+from bot.core.tasks.connection_watchdog import ConnectionWatchdogTask
 from bot.core.tasks.db_cleanup import DbCleanupTask
 from bot.core.tasks.ytdlp import YtdlpNewVersionNotifyTask
 from bot.core.workers.manager import RabbitWorkerManager
@@ -106,6 +107,15 @@ class BotLauncher:
         )
         create_task(
             DbCleanupTask(user_ids=user_ids).run(),
+            task_name=task_name,
+            logger=self._log,
+            exception_message='Task "%s" raised an exception',
+            exception_message_args=(task_name,),
+        )
+
+        task_name = ConnectionWatchdogTask.__class__.__name__
+        create_task(
+            ConnectionWatchdogTask(bot=self._bot).run(),
             task_name=task_name,
             logger=self._log,
             exception_message='Task "%s" raised an exception',

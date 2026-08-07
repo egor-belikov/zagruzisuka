@@ -18,6 +18,10 @@ services:
     mem_reservation: 128m
     cpu_shares: 200
     pids_limit: 256
+    env_file:
+      - envs/common.env
+      - envs/api.env
+      - envs/api.egorvps.env
 
   yt_bot:
     cpus: "0.75"

@@ -17,3 +17,4 @@ class DownloadProgressPayload(StrictBaseConfigModel):
     pipeline_log_message_id: int | None = None
     url: Annotated[str, StringConstraints(max_length=512)]
     line: Annotated[str, StringConstraints(max_length=4000)]
+    pulse_text: Annotated[str | None, StringConstraints(max_length=500)] = None

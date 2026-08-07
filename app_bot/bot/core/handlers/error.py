@@ -25,7 +25,7 @@ class ErrorDownloadHandler(AbstractDownloadHandler):
     _ERR_MSG_TPL = (
         '🛑 <b>{header}</b>\n\n'
         'ℹ <b>Task ID:</b> <code>{task_id}</code>\n'  # noqa: RUF001
-        '💬 <b>Причина:</b>\n<pre>{reason}</pre>\n'
+        '💬 <b>Причина:</b>\n<pre>{{reason}}</pre>\n'
         '📹 <b>Video URL:</b> <code>{url}</code>\n'
         '🌊 <b>Source:</b> <code>{source}</code>\n'
         '🔧 <b>Тип:</b> <code>{exception_type}</code>\n'
