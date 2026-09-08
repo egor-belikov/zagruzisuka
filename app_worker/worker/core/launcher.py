@@ -5,6 +5,7 @@ from yt_dlp import version as ytdlp_version
 from yt_shared.db.session import get_db
 from yt_shared.rabbit import get_rabbitmq
 from yt_shared.rabbit.rabbit_config import INPUT_QUEUE
+from yt_shared.repositories.task import TaskRepository
 from yt_shared.repositories.ytdlp import YtdlpRepository
 from yt_shared.utils.common import register_shutdown
 
@@ -32,6 +33,12 @@ class WorkerLauncher:
             await asyncio.sleep(self._RUN_FOREVER_SLEEP_SECONDS)
 
     async def _perform_setup(self) -> None:
+        # Must run before `_setup_rabbit()` starts consuming: a freshly started
+        # worker owns no in-flight task, so anything still PROCESSING in the DB
+        # is orphaned from a previous process that died mid-download and never
+        # got to mark it FAILED. Left alone, those rows inflate the /queue
+        # backlog count forever instead of just this one run's leftovers.
+        await self._reset_orphaned_processing_tasks()
         await asyncio.gather(
             *(
                 self._setup_rabbit(),
@@ -40,6 +47,17 @@ class WorkerLauncher:
             )
         )
         self._register_shutdown()
+
+    async def _reset_orphaned_processing_tasks(self) -> None:
+        async for db in get_db():
+            n = await TaskRepository(db).reset_orphaned_processing_tasks(
+                'Задача осталась в статусе PROCESSING после перезапуска воркера '
+                '(предыдущий процесс завершился, не закончив загрузку).'
+            )
+        if n:
+            self._log.warning(
+                'Reset %d orphaned PROCESSING task(s) to FAILED on startup', n
+            )
 
     async def _setup_rabbit(self) -> None:
         self._log.info('Setting up RabbitMQ connection')

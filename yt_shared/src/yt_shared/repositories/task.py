@@ -94,6 +94,26 @@ class TaskRepository:
         task.progress_updated_at = None
         await self._db.commit()
 
+    async def reset_orphaned_processing_tasks(self, error_message: str) -> int:
+        """Fail tasks left in PROCESSING by a worker process that died/was
+        killed before finishing (crash, OOM, redeploy). A freshly started
+        worker owns no in-flight task yet, so anything still PROCESSING at
+        that point is orphaned and would otherwise inflate the queue backlog
+        forever."""
+        stmt = (
+            update(Task)
+            .where(Task.status == TaskStatus.PROCESSING)
+            .values(
+                status=TaskStatus.FAILED,
+                error=error_message,
+                progress_snapshot=None,
+                progress_updated_at=None,
+            )
+        )
+        result: 'CursorResult' = await self._db.execute(stmt)
+        await self._db.commit()
+        return result.rowcount
+
     async def update_task_progress_snapshot(self, task_id: UUID, line: str) -> None:
         stmt = (
             update(Task)
