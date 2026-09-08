@@ -39,6 +39,13 @@ _DEFAULT_MAX_FILESIZE = (
 _DEFAULT_SOCKET_TIMEOUT = 120
 _DEFAULT_RETRIES = 15
 _DEFAULT_FRAGMENT_RETRIES = 50
+# `retries`/`fragment_retries` покрывают только фазу самой закачки файла.
+# Получение метаданных (webpage/API запрос экстрактора, напр. Instagram)
+# retry'ится отдельным параметром yt-dlp — `extractor_retries` (дефолт в
+# самом yt-dlp — всего 3). При просадках на VPN-прокси (Mihomo/WizardVPN,
+# см. proxy/mihomo.yaml) 3 попыток не хватает и extract_info тихо
+# возвращает None вместо поднятия ошибки — см. "yt-dlp не вернул метаданные".
+_DEFAULT_EXTRACTOR_RETRIES = 10
 _DEFAULT_CONCURRENT_FRAGMENTS = 1
 # YouTube душит длинные одиночные соединения (~650 КБ/с при канале ноды в 47 Мбит/с).
 # Range-запросы кусками сбрасывают throttling: на замерах 2026-08 те же файлы шли
@@ -203,6 +210,10 @@ def _merge_global_ytdl_opts(opts: dict) -> dict:
         )
     if 'retries' not in out:
         out['retries'] = _env_positive_int('YTDLP_RETRIES', _DEFAULT_RETRIES)
+    if 'extractor_retries' not in out:
+        out['extractor_retries'] = _env_positive_int(
+            'YTDLP_EXTRACTOR_RETRIES', _DEFAULT_EXTRACTOR_RETRIES
+        )
     if 'fragment_retries' not in out:
         out['fragment_retries'] = _env_positive_int(
             'YTDLP_FRAGMENT_RETRIES', _DEFAULT_FRAGMENT_RETRIES
