@@ -36,9 +36,28 @@ api_ok() {
   curl -sf --max-time 5 http://127.0.0.1:1984/status >/dev/null 2>&1
 }
 
+bot_stuck_since() {
+  # `docker logs` keeps lines across `docker restart` (same container, log file
+  # isn't rotated), so a plain "--since ${STUCK_RESTART_MINUTES}m" wall-clock
+  # window kept matching the *previous* incident's log lines for up to
+  # STUCK_RESTART_MINUTES after we already restarted for it — the watchdog
+  # then restarted the bot again on every following 5-minute tick even though
+  # it had recovered right after the first restart. Bound the window to the
+  # container's own last start time so old, already-handled lines drop out.
+  local window_epoch started_epoch
+  window_epoch=$(( $(date +%s) - STUCK_RESTART_MINUTES * 60 ))
+  started_epoch="$(date -d "$(docker inspect "$BOT_CONTAINER" --format='{{.State.StartedAt}}' 2>/dev/null)" +%s 2>/dev/null || echo 0)"
+  if [[ "$started_epoch" -gt "$window_epoch" ]]; then
+    echo "$started_epoch"
+  else
+    echo "$window_epoch"
+  fi
+}
+
 bot_stuck_in_restart() {
-  local count
-  count="$(docker logs "$BOT_CONTAINER" --since "${STUCK_RESTART_MINUTES}m" 2>&1 \
+  local since count
+  since="$(bot_stuck_since)"
+  count="$(docker logs "$BOT_CONTAINER" --since "$since" 2>&1 \
     | grep -c 'Session.restart()' || true)"
   [[ "$count" -ge 5 ]] && return 0
   local last_activity
@@ -49,7 +68,7 @@ bot_stuck_in_restart() {
   if [[ -z "$last_activity" ]]; then
     return 1
   fi
-  if docker logs "$BOT_CONTAINER" --since "${STUCK_RESTART_MINUTES}m" 2>&1 \
+  if docker logs "$BOT_CONTAINER" --since "$since" 2>&1 \
     | grep -q 'Connection lost'; then
     return 0
   fi
