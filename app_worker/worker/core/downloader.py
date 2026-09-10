@@ -72,12 +72,11 @@ _DIRECT_YTDLP_HOST_SUFFIXES: frozenset[str] = frozenset(
         'phncdn.com',
         'phprcdn.com',
         'rutube.ru',
-        'youtube.com',
-        'youtu.be',
-        'googlevideo.com',
-        'ytimg.com',
     )
 )
+# YouTube убран из этого списка 2026-09-10: прямое TLS-соединение с youtube.com
+# с этого VPS зависает на handshake (RU-блокировка), а через Mihomo (proxy/mihomo.yaml)
+# youtube.com уже матчится RuleSet(russia-inside-domain) → PROXY и работает нормально.
 
 
 def _is_rutube_url(url: str) -> bool:
