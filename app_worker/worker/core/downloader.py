@@ -53,6 +53,12 @@ _DEFAULT_CONCURRENT_FRAGMENTS = 1
 # возвращаются «fragment not found» и FileNotFoundError на .part-FragN при merge,
 # поэтому _DEFAULT_CONCURRENT_FRAGMENTS остаётся 1.
 _DEFAULT_HTTP_CHUNK_SIZE = 10 * 1024 * 1024  # 0 = отключить чанки
+# Чанки включаем только для YouTube: на HLS с EXT-X-BYTERANGE (fMP4 от shaka-packager,
+# напр. ntv.ru) yt-dlp с http_chunk_size считает конец по полному размеру файла
+# из Content-Range и зацикливается на «Conflicting range (start=N+1 > end=N)».
+_HTTP_CHUNK_HOST_SUFFIXES: frozenset[str] = frozenset(
+    ('youtube.com', 'youtu.be', 'googlevideo.com')
+)
 _STREAMFF_HOSTS = {
     'streamff.com',
     'www.streamff.com',
@@ -129,6 +135,17 @@ def _ytdlp_should_bypass_proxy(url: str) -> bool:
 def _maybe_strip_proxy_for_direct_hosts(opts: dict, *urls: str) -> None:
     if any(_ytdlp_should_bypass_proxy(u) for u in urls if u):
         opts.pop('proxy', None)
+
+
+def _maybe_strip_http_chunk_size(opts: dict, *urls: str) -> None:
+    for u in urls:
+        host = (urlsplit(u).hostname or '').lower() if u else ''
+        if any(
+            host == suffix or host.endswith('.' + suffix)
+            for suffix in _HTTP_CHUNK_HOST_SUFFIXES
+        ):
+            return
+    opts.pop('http_chunk_size', None)
 
 
 def _first_env_proxy() -> str | None:
@@ -522,6 +539,7 @@ class MediaDownloader:
 
             opts = _merge_global_ytdl_opts(dict(ytdl_opts_model.ytdl_opts))
             _maybe_strip_proxy_for_direct_hosts(opts, url, resolved_url)
+            _maybe_strip_http_chunk_size(opts, url, resolved_url)
             if bunker_res is not None:
                 hdrs = dict(opts.get('http_headers') or {})
                 hdrs.update(bunker_res.http_headers)
