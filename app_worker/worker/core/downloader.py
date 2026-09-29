@@ -9,11 +9,12 @@ from tempfile import TemporaryDirectory
 from typing import ClassVar
 from urllib.parse import urlsplit
 
-import ssl
-import urllib.error
-import urllib.request
+import time
 
 import yt_dlp
+from yt_dlp.networking import Request as YtdlpRequest
+from yt_dlp.networking.exceptions import HTTPError as YtdlpHTTPError
+from yt_dlp.networking.exceptions import RequestError as YtdlpRequestError
 from yt_dlp.utils import DownloadError
 from yt_shared.enums import DownMediaType
 from yt_shared.schemas.media import Audio, DownMedia, InbMediaPayload, Video
@@ -289,34 +290,70 @@ def _bunkr_download_proxy_chain() -> list[str | None]:
     return chain
 
 
+_BUNKR_ATTEMPTS_PER_PATH = 4
+_BUNKR_RETRY_HTTP_CODES = frozenset({403, 429, 500, 502, 503, 504, 520, 521, 522, 524})
+
+
+class _BunkrHttpError(Exception):
+    def __init__(self, status: int, reason: str | None) -> None:
+        super().__init__(f'HTTP {status}: {reason or ""}'.strip())
+        self.status = status
+        self.reason = reason or ''
+
+
 def _http_download_to_file(
     source_url: str,
     dest_path: Path,
     headers: dict[str, str],
     proxy: str | None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> int:
-    handlers: list = []
-    if proxy:
-        handlers.append(
-            urllib.request.ProxyHandler(
-                {"http": proxy, "https": proxy, "socks5": proxy, "socks": proxy}
-            )
-        )
-    handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    opener = urllib.request.build_opener(*handlers)
+    """Download (or resume) ``source_url`` into ``dest_path``.
+
+    Uses yt-dlp's networking stack so that SOCKS (socks5h://) proxies work,
+    unlike plain urllib. Resumes via Range if ``dest_path`` already has data.
+    """
+    already = dest_path.stat().st_size if dest_path.exists() else 0
     req_headers = dict(headers)
-    req_headers.setdefault("Accept", "*/*")
-    req = urllib.request.Request(source_url, headers=req_headers, method="GET")
-    with opener.open(req, timeout=300) as resp:
-        total = 0
-        with dest_path.open("wb") as out:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                out.write(chunk)
-                total += len(chunk)
-    return total
+    req_headers.setdefault('Accept', '*/*')
+    if already:
+        req_headers['Range'] = f'bytes={already}-'
+    ydl_params = {
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 60,
+        # '' means "no proxy" (direct), overriding environment proxies.
+        'proxy': proxy or '',
+    }
+    with yt_dlp.YoutubeDL(ydl_params) as ydl:
+        try:
+            resp = ydl.urlopen(
+                YtdlpRequest(source_url, headers=req_headers, proxies={'all': proxy or None})
+            )
+        except YtdlpHTTPError as err:
+            if err.status == 416 and already:
+                return already
+            raise _BunkrHttpError(err.status, err.reason) from err
+        with resp:
+            status = getattr(resp, 'status', 200)
+            if already and status != 206:
+                # Server ignored Range: start over.
+                already = 0
+            length = resp.headers.get('Content-Length')
+            total = already + int(length) if length and length.isdigit() else None
+            done = already
+            with dest_path.open('ab' if already else 'wb') as out:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if on_progress:
+                        on_progress(done, total)
+    if total is not None and done < total:
+        raise ConnectionError(f'incomplete read: {done} of {total} bytes')
+    return done
 
 class MediaDownloader:
     _PLAYLIST_TYPE = 'playlist'
@@ -443,38 +480,84 @@ class MediaDownloader:
                     hdrs['Cookie'] = '; '.join(f'{c.name}={c.value}' for c in cj)
                 except Exception:
                     pass
-            last_http_err: urllib.error.HTTPError | None = None
+            last_pct = [-1]
+
+            def _on_progress(done: int, total: int | None) -> None:
+                if not progress_hook or not total:
+                    return
+                pct = int(done * 100 / total)
+                if pct == last_pct[0]:
+                    return
+                last_pct[0] = pct
+                progress_hook(
+                    {
+                        'status': 'downloading',
+                        '_percent_str': f'{pct}%',
+                        'downloaded_bytes': done,
+                        'total_bytes': total,
+                    }
+                )
+
+            last_err: Exception | None = None
             size = 0
             for proxy in _bunkr_download_proxy_chain():
-                try:
-                    size = _http_download_to_file(
-                        bunker_res.direct_url,
-                        dest,
-                        hdrs,
-                        proxy,
-                    )
-                    last_http_err = None
-                    break
-                except urllib.error.HTTPError as err:
-                    last_http_err = err
-                    if err.code in (403, 429):
-                        self._log.warning(
-                            'Bunkr CDN HTTP %s via proxy=%s, trying next path',
-                            err.code,
-                            proxy or 'direct',
+                # Partial data from another path may be unusable; start clean.
+                dest.unlink(missing_ok=True)
+                for attempt in range(1, _BUNKR_ATTEMPTS_PER_PATH + 1):
+                    try:
+                        size = _http_download_to_file(
+                            bunker_res.direct_url,
+                            dest,
+                            hdrs,
+                            proxy,
+                            _on_progress,
                         )
-                        continue
-                    raise
-            if last_http_err is not None:
-                raise last_http_err
-        except urllib.error.HTTPError as err:
+                        last_err = None
+                        break
+                    except _BunkrHttpError as err:
+                        last_err = err
+                        if err.status not in _BUNKR_RETRY_HTTP_CODES:
+                            raise
+                        if err.status in (403, 429):
+                            # Blocked on this path: switch proxy right away.
+                            break
+                    except (YtdlpRequestError, OSError) as err:
+                        last_err = err
+                    self._log.warning(
+                        'Bunkr CDN attempt %s/%s via proxy=%s failed: %s',
+                        attempt,
+                        _BUNKR_ATTEMPTS_PER_PATH,
+                        proxy or 'direct',
+                        last_err,
+                    )
+                    time.sleep(min(2 * attempt, 10))
+                if last_err is None:
+                    break
+                self._log.warning(
+                    'Bunkr CDN failed via proxy=%s, trying next path', proxy or 'direct'
+                )
+            if last_err is not None:
+                raise last_err
+        except _BunkrHttpError as err:
             raise MediaDownloaderError(
                 format_download_failure(
                     reason=(
-                        f"Bunkr CDN HTTP {err.code}: {err.reason}. "
+                        f"Bunkr CDN HTTP {err.status}: {err.reason}. "
                         "CDN prxp-b.cdn.cr блокирует IP датацентра (VPS и Wizard VPN). "
                         "Экспортируй cookies из браузера на ПК (где Bunkr открывается) "
                         "в /app/cookies/cookies.txt или укажи residential BUNKR_CDN_PROXY."
+                    ),
+                    url=url,
+                    resolved_url=bunker_res.direct_url,
+                )
+            ) from err
+        except (YtdlpRequestError, OSError) as err:
+            raise MediaDownloaderError(
+                format_download_failure(
+                    reason=(
+                        f"{err}. Bunkr CDN обрывает соединение по всем путям "
+                        "(direct/прокси). Похоже на блокировку IP датацентра — "
+                        "укажи residential BUNKR_CDN_PROXY (socks5h://…)."
                     ),
                     url=url,
                     resolved_url=bunker_res.direct_url,
